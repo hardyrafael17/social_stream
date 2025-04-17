@@ -6,12 +6,13 @@
 		  
 		var blob = xhr.response;
     
-		if (blob.size > (25 * 1024)) {
+		if (blob.size > (55 * 1024)) {
 		  callback(url); // Image size is larger than 25kb.
 		  return;
 		}
 
 		var reader = new FileReader();
+		
 		
 		reader.onloadend = function() {
 		  callback(reader.result);
@@ -23,7 +24,7 @@
 	  xhr.send();
 	}
 
-	function escapeHtml(unsafe){ // success is when goofs be trying to hack me
+	function escapeHtml(unsafe){ // when goofs be trying to hack me
 		return unsafe
 			 .replace(/&/g, "&amp;")
 			 .replace(/</g, "&lt;")
@@ -31,91 +32,94 @@
 			 .replace(/"/g, "&quot;")
 			 .replace(/'/g, "&#039;") || "";
 	}
-	function getAllContentNodes(element) {
-		var resp = " ";
+
+	function getAllContentNodes(element) { // takes an element.
+		var resp = "";
+		
+		if (!element){return resp;}
 		
 		if (!element.childNodes || !element.childNodes.length){
-			if (element.nodeType===3){
-				return escapeHtml(element.textContent) || " ";
+			if (element.textContent){
+				return escapeHtml(element.textContent) || "";
+			} else {
+				return "";
 			}
 		}
 		
 		element.childNodes.forEach(node=>{
 			if (node.childNodes.length){
-				if (!node.classList.contains("comment-see-more")){
-					resp += getAllContentNodes(node)
-				}
+				resp += getAllContentNodes(node)
 			} else if ((node.nodeType === 3) && node.textContent && (node.textContent.trim().length > 0)){
-				resp += escapeHtml(node.textContent+ " ");
+				resp += escapeHtml(node.textContent)+" ";
 			} else if (node.nodeType === 1){
 				if (!settings.textonlymode){
 					if ((node.nodeName == "IMG") && node.src){
 						node.src = node.src+"";
 					}
-					resp += node.outerHTML+" ";
+					resp += node.outerHTML;
 				}
 			}
 		});
 		return resp;
 	}
 	
+	var settings = {};
+	// settings.textonlymode
+	// settings.captureevents
+	
+	var channelName = "";
+	
 	function processMessage(ele){
 		
-		//console.log(ele);
-		
-		let eventType = "";
-		if (ele.querySelector("[class*='joinedText']")){
-			eventType = "joined";
-		}
-		
-		var chatimg = "";
-		try{
-		   chatimg = ele.querySelector(".pc-borderRadius-full source")?.srcset.split(" ")[0].replace("w_24,h_24","w_144,h_144") || "";
+		var chatimg = ""
+
+		try {
+			chatimg = ele.querySelector("img.rounded-full[src]").src;
 		} catch(e){
 		}
 		
 		var name="";
 		try {
-			name = escapeHtml(ele.querySelector("div > span a[href^='https://substack.com/@']")?.textContent.trim());
+			name = escapeHtml(ele.querySelector(".text-sm.font-bold").textContent);
 		} catch(e){
 		}
 		
+		var namecolor="";
 		
+		var badges=[];
+		/* try {
+			ele.querySelectorAll("img[class^='ChatBadge_image_'][src]").forEach(badge=>{
+				badges.push(badge.src);
+			});
+		} catch(e){
+		} */
+
 		var msg="";
 		try {
-			if (eventType){
-				msg = getAllContentNodes(ele.querySelector(".pencraft.pc-opacity-90")).trim();
-				if (msg!="joined"){
-					msg = getAllContentNodes(ele).trim();
-				}
-			} else {
-				msg = getAllContentNodes(ele.querySelector(".pencraft.pc-opacity-90")).trim();
-			}
+			msg = getAllContentNodes(ele.querySelector(".str-chat__message-text-inner")).trim();
 		} catch(e){
 		}
 		
-		var contentimg = "";
 		
+		if (!msg || !name){
+			return;
+		}
 		
-		if (!msg && !contentimg){return;}
 		
 		var data = {};
 		data.chatname = name;
-		data.chatbadges = "";
+		data.chatbadges = badges;
 		data.backgroundColor = "";
 		data.textColor = "";
-		
+		data.nameColor = namecolor;
 		data.chatmessage = msg;
 		data.chatimg = chatimg;
 		data.hasDonation = "";
 		data.membership = "";
-		data.contentimg = contentimg;
+		data.contentimg = "";
 		data.textonly = settings.textonlymode || false;
-		data.type = "substack";
+		data.type = "moonbeam";
 		
-		if(eventType){
-			data.event = eventType;
-		}
 		
 		pushMessage(data);
 	}
@@ -126,86 +130,16 @@
 		} catch(e){
 		}
 	}
-	
-	var settings = {};
-	// settings.textonlymode
-	// settings.captureevents
-	
-	
-	chrome.runtime.sendMessage(chrome.runtime.id, { "getSettings": true }, function(response){  // {"state":isExtensionOn,"streamID":channel, "settings":settings}
-		if ("settings" in response){
-			settings = response.settings;
-		}
-		if ("state" in response){
-			isExtensionOn = response.state;
-		}
-	});
-	
 	var isExtensionOn = true;
-	chrome.runtime.onMessage.addListener(
-		function (request, sender, sendResponse) {
-			if (!isExtensionOn){return;}
-			try{
-				if ("focusChat" == request){ // if (prev.querySelector('[id^="message-username-"]')){ //slateTextArea-
-					document.querySelector('input[class^="input-"], textarea, input[type="text"]').focus();
-					sendResponse(true);
-					return;
-				}
-				if (typeof request === "object"){
-					if ("state" in request) {
-						isExtensionOn = request.state;
-					}
-					if ("settings" in request){
-						settings = request.settings;
-						sendResponse(true);
-						return;
-					}
-				}
-			} catch(e){}
-			sendResponse(false);
-		}
-	);
-
-	var lastURL =  "";
-	var observer = null;
 	
-	
-	function onElementInserted(target) {
-		if (!target){return;}
-		
-		//console.log(target);
-		
-		var onMutationsObserved = function(mutations) {
-			mutations.forEach(function(mutation) {
-				if (mutation.addedNodes.length) {
-					//console.log(mutation.addedNodes);
-					for (var i = 0, len = mutation.addedNodes.length; i < len; i++) {
-						try {
-							if (mutation.addedNodes[i].skip){continue;}
-							mutation.addedNodes[i].skip = true;
-							processMessage(mutation.addedNodes[i]);
-						} catch(e){}
-					}
-				}
-			});
-		};
-		
-		var config = { childList: true, subtree: true };
-		var MutationObserver = window.MutationObserver || window.WebKitMutationObserver;
-		
-		observer = new MutationObserver(onMutationsObserved);
-		observer.observe(target, config);
-	}
-	
-	console.log("social stream injected");
-	
-
 	function checkViewers(){
 		if (isExtensionOn && (settings.showviewercount || settings.hypemode)){
 			try {
-				let viewerSpan = document.querySelectorAll("[class*='viewerCountContainer'] button")[1];
+				let viewerSpan = document.querySelector(".text-sm.text-neutral-400");
 				if (viewerSpan && viewerSpan.textContent){
+
 					let views = viewerSpan.textContent.toUpperCase();
+					views = views.split(" ")[0]
 					let multiplier = 1;
 					if (views.includes("K")){
 						multiplier = 1000;
@@ -220,7 +154,7 @@
 						chrome.runtime.sendMessage(
 							chrome.runtime.id,
 							({message:{
-									type: 'substack',
+									type: 'moonbeams',
 									event: 'viewer_update',
 									meta: views
 								}
@@ -234,18 +168,91 @@
 		}
 	}
 
+
+	// OnlineViewers_root_orkvv
+	
+	chrome.runtime.sendMessage(chrome.runtime.id, { "getSettings": true }, function(response){  // {"state":isExtensionOn,"streamID":channel, "settings":settings}
+		if ("settings" in response){
+			settings = response.settings;
+		}
+		if ("state" in response){
+			isExtensionOn = response.state;
+		}
+	});
+
+	chrome.runtime.onMessage.addListener(
+		function (request, sender, sendResponse) {
+			try{
+				if ("focusChat" == request){ // if (prev.querySelector('[id^="message-username-"]')){ //slateTextArea-
+				
+					document.querySelector('textarea').focus();
+					sendResponse(true);
+					return;
+				}
+				if (typeof request === "object"){
+					if ("state" in request) {
+						isExtensionOn = request.state;
+					}
+					if ("settings" in request){
+						settings = request.settings;
+						sendResponse(true);
+						return;
+					}
+				}
+				
+			} catch(e){}
+			sendResponse(false);
+		}
+	);
+
+	var lastURL =  "";
+	var observer = null;
+	
+	
+	function onElementInserted(target) {
+		var onMutationsObserved = function(mutations) {
+			mutations.forEach(function(mutation) {
+				if (mutation.addedNodes.length) {
+					for (var i = 0, len = mutation.addedNodes.length; i < len; i++) {
+						try {
+							if (mutation.addedNodes[i].skip){continue;}
+
+							mutation.addedNodes[i].skip = true;
+
+							processMessage(mutation.addedNodes[i]); // maybe here
+							
+						} catch(e){}
+					}
+				}
+			});
+		};
+		
+		var config = { childList: true, subtree: false };
+		var MutationObserver = window.MutationObserver || window.WebKitMutationObserver;
+		
+		observer = new MutationObserver(onMutationsObserved);
+		observer.observe(target, config);
+	}
+	
+	console.log("social stream injected");
+
+
+
 	setInterval(function(){
 		try {
-		if (document.querySelector('h4')?.nextSibling.childNodes.length){
-			if (!document.querySelector('h4').marked){
-				document.querySelector('h4').marked=true;
-				onElementInserted(document.querySelector('h4').nextSibling.childNodes[0]);
+			var container = document.querySelector('.str-chat__main-panel [data-viewport-type="element"] [data-test-id="virtuoso-item-list"]')
+
+			if (!container.marked){
+				container.marked=true;
+
+				console.log("CONNECTED chat detected");
+
+				setTimeout(function(){
+					onElementInserted(container);
+				},4000);
 			}
-			
 			checkViewers();
-		}} catch(e){}
-		
-		
+		} catch(e){}
 	},2000);
 
 })();
