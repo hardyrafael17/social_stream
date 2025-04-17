@@ -449,7 +449,7 @@ function updatePollOptions() {
     } else if (settings.pollType === 'freeform') {
         const instructionElement = document.createElement('div');
         instructionElement.className = 'poll-instruction';
-        instructionElement.textContent = 'Enter a hashtagged #word into chat to vote for it!';
+        instructionElement.textContent = 'Escribe tu voto empezando con `#` (ej: #voto)';
         pollOptionsContainer.appendChild(instructionElement);
     }
 }

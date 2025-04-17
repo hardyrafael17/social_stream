@@ -117,6 +117,12 @@ body {
   height: var(--width);
 }
 
+@media screen and (max-width: 930px) {
+  #staticUsername {
+    transform: translateY(-0.75rem);
+  }
+}
+
 .x {
   animation: x var(--x-speed) linear infinite alternate;
 }
@@ -257,6 +263,8 @@ span.zero-width-parent img.zero-width-emote {
 }
 #hype {
   display: inline-flex;
+  flex-wrap: wrap;
+  margin-bottom: -30px;
   font-size: var(--font-size);
 }
 #hype .style-topbar {
@@ -289,6 +297,7 @@ span.zero-width-parent img.zero-width-emote {
   border-radius: calc(2px * var(--scale));
   height: calc(20px * var(--scale));
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: calc(4px * var(--scale));
   min-width:unset;
@@ -378,6 +387,7 @@ span.zero-width-parent img.zero-width-emote {
   align-items: center;
   gap: calc(1px * var(--scale));
   min-width: unset;
+  flex-wrap: wrap;
 }
 .style-minimal [data-viewers],
 .style-minimal [data-chatters] {
@@ -478,7 +488,6 @@ span.zero-width-parent img.zero-width-emote {
 </head>
 <body class="electronDraggable" id="output">
 	<div id="parentHolder" class="hidden">
-		<div id="hype"></div>
 		<div id="hypetitle">Active chatters in the last 5-minutes</div>
 	</div>
 	<script>
@@ -812,6 +821,9 @@ span.zero-width-parent img.zero-width-emote {
 							document.getElementById("hype").innerHTML += "<div class='sourceStatHolder'><img class='sourceicons' src='./sources/images/"+keys[i]+".png'><span data-viewers='true' data-type='"+keys[i]+"'></span><span data-chatters='true' data-type='"+keys[i]+"'>"+data.hype[keys[i]]+"</span></div>";
 						}
 					}
+					// add one last item to the end of the list containing static username and icon for roblox 'chocolatico2309'
+						document.getElementById("hype").innerHTML += "<div class='sourceStatHolder' id='staticUsername'><img class='sourceicons' src='./sources/images/roblox.png'><span data-viewers='true' data-type='roblox'></span><span data-chatters='true' data-type='roblox'>chocolatico2309</span></div>";
+
 				}
 			}
 			
