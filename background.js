@@ -829,6 +829,7 @@ function loadSettings(item, resave = false) {
 	
 	setupSocket();
 	setupSocketDock();
+	handleStreamerBotSettingsChange();
 	loadedFirst = true;
 }
 ////////////
@@ -1036,69 +1037,80 @@ async function loadmidi() {
 
 var newFileHandle = false;
 async function overwriteFile(data = false) {
-	if (data == "setup") {
-		const opts = {
-			types: [
-				{
-					description: "JSON data",
-					accept: { "text/plain": [".txt"], "application/json": [".json"] }
-				}
-			]
-		};
-
-		if (!window.showSaveFilePicker) {
-			console.warn("Open `brave://flags/#file-system-access-api` and enable to use the File API");
-		}
-		newFileHandle = await window.showSaveFilePicker(opts);
-	} else if (newFileHandle && data) {
-		if (typeof newFileHandle == "string") {
-			ipcRenderer.send("write-to-file", { filePath: newFileHandle, data: data });
-		} else {
-			const writableStream = await newFileHandle.createWritable();
-			await writableStream.write(data);
-			await writableStream.close();
-		}
-	}
+    if (data == "setup") {
+        const opts = {
+            types: [
+                {
+                    description: "JSON data",
+                    accept: { "text/plain": [".txt"], "application/json": [".json"] }
+                }
+            ]
+        };
+        if (!window.showSaveFilePicker) {
+            console.warn("Open `brave://flags/#file-system-access-api` and enable to use the File API");
+        }
+        newFileHandle = await window.showSaveFilePicker(opts);
+        
+        // Store file path when isSSAPP is true
+        if (isSSAPP && typeof newFileHandle === "string") {
+            localStorage.setItem("savedFilePath", newFileHandle);
+        }
+    } else if (newFileHandle && data) {
+        if (typeof newFileHandle == "string") {
+            ipcRenderer.send("write-to-file", { filePath: newFileHandle, data: data });
+        } else {
+            const writableStream = await newFileHandle.createWritable();
+            await writableStream.write(data);
+            await writableStream.close();
+        }
+    }
 }
 
 var newSavedNamesFileHandle = false;
 var uniqueNameSet = [];
 async function overwriteSavedNames(data = false) {
-	if (data == "setup") {
-		uniqueNameSet = [];
-
-		const opts = {
-			types: [
-				{
-					description: "Text file",
-					accept: { "text/plain": [".txt"] }
-				}
-			]
-		};
-		if (!window.showSaveFilePicker) {
-			console.warn("Open `brave://flags/#file-system-access-api` and enable to use the File API");
-		}
-		newSavedNamesFileHandle = await window.showSaveFilePicker(opts);
-	} else if (data == "clear") {
-		uniqueNameSet = [];
-		
-	} else if (data == "stop") {
-		newSavedNamesFileHandle = false;
-		uniqueNameSet = [];
-		
-	} else if (newSavedNamesFileHandle && data) {
-		if (uniqueNameSet.includes(data)) {
-			return;
-		}
-		uniqueNameSet.push(data);
-		if (typeof newSavedNamesFileHandle == "string") {
-			ipcRenderer.send("write-to-file", { filePath: newSavedNamesFileHandle, data: uniqueNameSet.join("\r\n") });
-		} else {
-			const writableStream = await newSavedNamesFileHandle.createWritable();
-			await writableStream.write(uniqueNameSet.join("\r\n"));
-			await writableStream.close();
-		}
-	}
+    if (data == "setup") {
+        uniqueNameSet = [];
+        const opts = {
+            types: [
+                {
+                    description: "Text file",
+                    accept: { "text/plain": [".txt"] }
+                }
+            ]
+        };
+        if (!window.showSaveFilePicker) {
+            console.warn("Open `brave://flags/#file-system-access-api` and enable to use the File API");
+        }
+        newSavedNamesFileHandle = await window.showSaveFilePicker(opts);
+        
+        // Store file path when isSSAPP is true
+        if (isSSAPP && typeof newSavedNamesFileHandle === "string") {
+            localStorage.setItem("savedNamesFilePath", newSavedNamesFileHandle);
+        }
+    } else if (data == "clear") {
+        uniqueNameSet = [];
+    } else if (data == "stop") {
+        newSavedNamesFileHandle = false;
+        uniqueNameSet = [];
+        
+        // Clear saved path
+        if (isSSAPP) {
+            localStorage.removeItem("savedNamesFilePath");
+        }
+    } else if (newSavedNamesFileHandle && data) {
+        if (uniqueNameSet.includes(data)) {
+            return;
+        }
+        uniqueNameSet.push(data);
+        if (typeof newSavedNamesFileHandle == "string") {
+            ipcRenderer.send("write-to-file", { filePath: newSavedNamesFileHandle, data: uniqueNameSet.join("\r\n") });
+        } else {
+            const writableStream = await newSavedNamesFileHandle.createWritable();
+            await writableStream.write(uniqueNameSet.join("\r\n"));
+            await writableStream.close();
+        }
+    }
 }
 
 /* var newFileHandleExcel = false;
@@ -2977,7 +2989,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 					}
 				}
 			}
-			if (request.setting == "textonlymode") {
+			if (request.setting == "textonlymode") { 
 				pushSettingChange();
 			}
 			if (request.setting == "ignorealternatives") {
@@ -3041,6 +3053,15 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			}
 			if (request.setting == "customtwitchstate") {
 				pushSettingChange();
+			}
+			if (request.setting == "streamerbot") {
+				handleStreamerBotSettingsChange();
+			}
+			if (request.setting == "streamerbotendpoint") {
+				handleStreamerBotSettingsChange();
+			}
+			if (request.setting == "streamerbotpassword") {
+				handleStreamerBotSettingsChange();
 			}
 			if (request.setting == "replyingto") {
 				pushSettingChange();
@@ -3864,6 +3885,7 @@ async function sendToDestinations(message) {
 	sendToH2R(message);
 	sendToPost(message);
 	sendToDiscord(message);  // donos only
+	sendToStreamerBot(message);
 	if (message.chatmessage || message.hasDonation || message.chatname){
 		message.idx = await addMessageDB(message);
 	}
@@ -4284,6 +4306,652 @@ function sendToS10(data, fakechat=false, relayed=false) {
 
 function capitalizeFirstLetter(string) {
   return string.charAt(0).toUpperCase() + string.slice(1);
+}
+let streamerbotClient = null;
+class StreamerbotWebsocketClient {
+  constructor(options = {}) {
+    // Configuration
+    this.url = options.url || 'ws://127.0.0.1:8080';
+    this.autoReconnect = options.autoReconnect !== false;
+    this.reconnectInterval = options.reconnectInterval || 5000;
+    this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
+    this.debug = options.debug || false;
+    
+    // State
+    this.socket = null;
+    this.enabled = false;
+    this.reconnectAttempts = 0;
+    this.reconnectTimeout = null;
+    this.messageQueue = [];
+    this.isAuthenticated = false;
+    this.subscribedEvents = new Set();
+    this.sessionId = null;
+    
+    // Auth
+    this.password = options.password || '';
+    
+    // Callbacks
+    this.onConnected = options.onConnected || (() => {});
+    this.onDisconnected = options.onDisconnected || (() => {});
+    this.onError = options.onError || (() => {});
+    this.onMessage = options.onMessage || (() => {});
+    this.onReconnecting = options.onReconnecting || (() => {});
+    this.onAuthenticated = options.onAuthenticated || (() => {});
+    this.onAuthFailed = options.onAuthFailed || (() => {});
+  }
+
+  log(...args) {
+    if (this.debug) {
+      console.log('[StreamerbotWS]', ...args);
+    }
+  }
+
+  connect() {
+    if (this.socket && (this.socket.readyState === WebSocket.CONNECTING || this.socket.readyState === WebSocket.OPEN)) {
+      this.log('Already connected or connecting');
+      return;
+    }
+
+    this.enabled = true;
+    this.reconnectAttempts = 0;
+    this._connect();
+  }
+
+  _connect() {
+    try {
+      this.log(`Connecting to ${this.url}...`);
+      this.socket = new WebSocket(this.url);
+      
+      this.socket.onopen = this._handleOpen.bind(this);
+      this.socket.onclose = this._handleClose.bind(this);
+      this.socket.onerror = this._handleError.bind(this);
+      this.socket.onmessage = this._handleMessage.bind(this);
+    } catch (error) {
+      this.log('Connection error:', error);
+      this._scheduleReconnect();
+    }
+  }
+
+  disconnect() {
+    this.enabled = false;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    
+    if (this.socket) {
+      this.log('Disconnecting...');
+      try {
+        this.socket.close(1000, 'Disconnect requested');
+      } catch (error) {
+        this.log('Error during disconnect:', error);
+      }
+      this.socket = null;
+      this.isAuthenticated = false;
+      this.sessionId = null;
+    }
+  }
+
+  _handleOpen() {
+    this.log('Connected to Streamer.bot WebSocket');
+    this.reconnectAttempts = 0;
+    this.onConnected();
+  }
+
+ async _handleMessage(event) {
+  try {
+    const data = JSON.parse(event.data);
+    this.log('Received message:', data);
+    
+    // Handle initial handshake with challenge-based authentication
+    if (data.request === "Hello") {
+      this.sessionId = data.session;
+      
+      if (data.authentication) {
+        // Modern Streamer.bot uses challenge-based auth
+        this.log('Authentication required with challenge.');
+        
+        // First try to handle auth-free mode 
+        const getInfoPayload = {
+          request: 'GetInfo',
+          id: 'info-' + Date.now()
+        };
+        
+        this.log('Checking if authentication is required...');
+        this.socket.send(JSON.stringify(getInfoPayload));
+        return;
+      } else {
+        // No authentication required
+        this.isAuthenticated = true;
+        this.onAuthenticated();
+        this._processQueue();
+        this._subscribeToEvents();
+      }
+      return;
+    }
+    
+    // Handle GetInfo response
+    if (data.id && data.id.startsWith('info-')) {
+      if (data.status === "ok") {
+        this.log('No authentication required');
+        this.isAuthenticated = true;
+        this.onAuthenticated();
+        this._processQueue();
+        this._subscribeToEvents();
+      } else {
+        // Auth is required, handle it properly
+        this.log('Authentication required, attempting...');
+        
+        // Simple password auth (no challenge)
+        const authPayload = {
+          request: 'Authenticate',
+          id: 'auth-' + Date.now(),
+          authentication: this.password
+        };
+        
+        this.log('Sending password auth');
+        this.socket.send(JSON.stringify(authPayload));
+      }
+      return;
+    }
+    
+    // Handle authentication response
+    if (data.id && data.id.startsWith('auth-')) {
+      if (data.status === "ok" || (data.status && data.status.code === 200)) {
+        this.log('Authentication successful');
+        this.isAuthenticated = true;
+        this.onAuthenticated();
+        this._processQueue();
+        this._subscribeToEvents();
+      } else {
+        this.log('Authentication failed:', data);
+        this.isAuthenticated = false;
+        this.onAuthFailed(data);
+      }
+      return;
+    }
+    
+    // Process regular messages
+    this.onMessage(data);
+  } catch (error) {
+    this.log('Error processing message:', error, event.data);
+  }
+}
+
+  _handleClose(event) {
+    this.isAuthenticated = false;
+    this.sessionId = null;
+    this.log(`WebSocket closed: ${event.code} ${event.reason}`);
+    this.onDisconnected(event);
+    
+    if (this.enabled && this.autoReconnect) {
+      this._scheduleReconnect();
+    }
+  }
+
+  _handleError(error) {
+    this.log('WebSocket error:', error);
+    this.onError(error);
+  }
+
+  _scheduleReconnect() {
+    if (!this.enabled || !this.autoReconnect) return;
+    
+    this.reconnectAttempts++;
+    
+    if (this.maxReconnectAttempts > 0 && this.reconnectAttempts > this.maxReconnectAttempts) {
+      this.log(`Maximum reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
+      return;
+    }
+    
+    const delay = this.reconnectInterval;
+    this.log(`Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
+    this.onReconnecting(this.reconnectAttempts);
+    
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnectTimeout = null;
+      this._connect();
+    }, delay);
+  }
+
+  _processQueue() {
+    if (!this.isAuthenticated || this.messageQueue.length === 0) return;
+    
+    this.log(`Processing queued messages (${this.messageQueue.length})`);
+    while (this.messageQueue.length > 0) {
+      const message = this.messageQueue.shift();
+      this._sendMessage(message);
+    }
+  }
+
+  _sendMessage(message) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.log('Socket not open, queueing message');
+      this.messageQueue.push(message);
+      
+      if (this.enabled && (!this.socket || this.socket.readyState !== WebSocket.CONNECTING)) {
+        this._connect();
+      }
+      return false;
+    }
+    
+    if (!this.isAuthenticated && message.request !== "GetInfo" && message.request !== "Authenticate") {
+      this.log('Not authenticated, queueing message');
+      this.messageQueue.push(message);
+      return false;
+    }
+    
+    try {
+      const payload = typeof message === 'string' ? message : JSON.stringify(message);
+      this.log('Sending message:', message);
+      this.socket.send(payload);
+      return true;
+    } catch (error) {
+      this.log('Error sending message:', error);
+      return false;
+    }
+  }
+  
+ _subscribeToEvents() {
+  if (this.subscribedEvents.size === 0) return;
+  
+  const eventsArray = Array.from(this.subscribedEvents);
+  this.log('Subscribing to events:', eventsArray);
+  
+  // Build the correct events format
+  const eventsByCategory = {};
+  
+  for (const event of eventsArray) {
+    const [category, type] = event.includes('.') ? event.split('.', 2) : ['Raw', event];
+    
+    if (!eventsByCategory[category]) {
+      eventsByCategory[category] = [];
+    }
+    
+    eventsByCategory[category].push(type);
+  }
+  
+  this.log('Events by category:', eventsByCategory);
+  
+  // Send subscription request
+  const subscribePayload = {
+    request: 'Subscribe',
+    id: 'subscribe-' + Date.now(),
+    events: eventsByCategory
+  };
+  
+  this._sendMessage(subscribePayload);
+}
+  // Public API methods remain the same
+  subscribe(events) {
+    const eventList = Array.isArray(events) ? events : [events];
+    let newEvents = false;
+    
+    for (const event of eventList) {
+      if (!this.subscribedEvents.has(event)) {
+        this.subscribedEvents.add(event);
+        newEvents = true;
+      }
+    }
+    
+    if (newEvents && this.isAuthenticated && this.socket?.readyState === WebSocket.OPEN) {
+      this._subscribeToEvents();
+    }
+  }
+  
+  unsubscribe(events) {
+    const eventList = Array.isArray(events) ? events : [events];
+    
+    for (const event of eventList) {
+      this.subscribedEvents.delete(event);
+    }
+    
+    if (this.isAuthenticated && this.socket?.readyState === WebSocket.OPEN) {
+      // Convert to object format with categories
+      const eventsByCategory = {};
+      
+      for (const event of eventList) {
+        const [category, type] = event.includes('.') ? event.split('.', 2) : ['Raw', event];
+        
+        if (!eventsByCategory[category]) {
+          eventsByCategory[category] = [];
+        }
+        
+        if (type) {
+          eventsByCategory[category].push(type);
+        }
+      }
+      
+      const unsubscribePayload = {
+        request: 'Unsubscribe',
+        id: 'unsubscribe-' + Date.now(),
+        events: eventsByCategory
+      };
+      
+      this._sendMessage(unsubscribePayload);
+    }
+  }
+sendChatMessage(chatData, fakechat = false, relayed = false) {
+  if (!chatData) return false;
+  
+  try {
+    // Make sure we have a valid message
+    let message = chatData.chatmessage;
+    if (!message) return false;
+    
+    // Clean message if needed
+    if (chatData.textonly) {
+      message = message.replace(/<\/?[^>]+(>|$)/g, "");
+      message = message.replace(/\s\s+/g, " ");
+    } else if (typeof message === 'string') {
+      message = message.replace(/<[^>]*>/g, "");
+    }
+    
+    // Format platform prefix if needed
+    if (chatData.type && chatData.type !== "Chat") {
+      message = `[${chatData.type}] ${message}`;
+    }
+    
+    // Create the proper chat message payload format for Streamer.bot
+    const payload = {
+      request: "ChatMessage",
+      id: "chat-" + Date.now(),
+      data: {
+        message: message,
+        userName: chatData.chatname || chatData.userid || "SocialStream",
+        userId: chatData.userid || chatData.chatname || "socialstream",
+        // It appears "Chat" works as a valid platform when testing
+        platform: "Chat",
+        color: chatData.nameColor || "#FFFFFF",
+        badges: chatData.chatbadges ? [chatData.chatbadges] : [],
+        avatar: chatData.chatimg || null,
+        isBot: chatData.isBot || false,
+        isAction: false
+      }
+    };
+    
+    return this._sendMessage(payload);
+  } catch (error) {
+    this.log('Error sending to chat system:', error);
+    return false;
+  }
+}
+  
+ sendToChatSystem(chatData) {
+  if (!chatData) return false;
+  
+  try {
+    // Use "Chat" as a platform that Streamer.bot definitely supports
+    const payload = {
+      request: "ChatMessage",
+      id: "chat-system-" + Date.now(),
+      data: {
+        message: chatData.chatmessage,
+        userName: chatData.chatname || "Viewer",
+        userId: chatData.userid || chatData.chatname || "unknown",
+        platforms: ["Chat"], // Use "Chat" as the platform for better compatibility
+        color: chatData.nameColor || "#FFFFFF",
+        badges: chatData.chatbadges ? [chatData.chatbadges] : [],
+        avatar: chatData.chatimg || null,
+        isBot: chatData.isBot || false,
+        isAction: false,
+        source: "SocialStream.Ninja"
+      }
+    };
+    
+    // If you want to show the original platform, add it to the message
+    if (chatData.type && chatData.type !== "Chat") {
+      payload.data.message = `[${chatData.type}] ${payload.data.message}`;
+    }
+    
+    return this._sendMessage(payload);
+  } catch (error) {
+    this.log('Error sending to chat system:', error);
+    return false;
+  }
+}
+  
+  doAction(actionId, args = {}) {
+    // Method remains the same
+    if (!actionId) {
+      this.log('No action ID provided');
+      return false;
+    }
+    
+    const payload = {
+      request: "DoAction",
+      id: "action-" + Date.now(),
+      action: {
+        id: actionId
+      },
+      args: args
+    };
+    
+    return this._sendMessage(payload);
+  }
+  
+  getActions() {
+    // Method remains the same
+    return new Promise((resolve, reject) => {
+      const id = "get-actions-" + Date.now();
+      
+      const handler = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.id === id) {
+            this.socket.removeEventListener('message', handler);
+            
+            if (data.status && data.status.code === 200) {
+              resolve(data.actions || []);
+            } else {
+              reject(new Error(`Failed to get actions: ${data.status?.description || 'Unknown error'}`));
+            }
+          }
+        } catch (error) {
+          // Ignore other messages
+        }
+      };
+      
+      this.socket.addEventListener('message', handler);
+      
+      const payload = {
+        request: "GetActions",
+        id: id
+      };
+      
+      const sent = this._sendMessage(payload);
+      if (!sent) {
+        this.socket.removeEventListener('message', handler);
+        reject(new Error('Failed to send GetActions request'));
+      }
+    });
+  }
+}
+
+
+function sendToStreamerBot(data, fakechat = false, relayed = false) {
+  // Initialize if needed
+  if (!streamerbotClient && settings.streamerbot) {
+    initializeStreamerbot();
+  }
+
+  // If not initialized or disabled, exit
+  if (!streamerbotClient || !streamerbotClient.enabled || !streamerbotClient.isAuthenticated) {
+    // Added checks for enabled and authenticated state
+    if (settings.streamerbot) {
+         console.log("Streamer.bot client not ready (enabled:", streamerbotClient?.enabled, "authenticated:", streamerbotClient?.isAuthenticated, "), queuing or skipping message.");
+         // You might want to queue messages here if the client is expected to connect soon
+    }
+    return;
+  }
+
+  try {
+    // Skip streamerbot messages to avoid loops
+    if (data.type && data.type === "streamerbot") {
+      return;
+    }
+
+    // Skip messages that contain certain translations or empty messages
+    if (!data.chatmessage ||
+        (data.chatmessage.includes && data.chatmessage.includes(miscTranslations.said))) {
+      return null;
+    }
+
+    // Clean the message
+    let cleaned = data.chatmessage;
+    if (data.textonly) {
+      cleaned = cleaned.replace(/<\/?[^>]+(>|$)/g, "");
+      cleaned = cleaned.replace(/\s\s+/g, " ");
+    } else if (typeof cleaned === 'string') {
+      cleaned = decodeAndCleanHtml(cleaned); // Assuming decodeAndCleanHtml is defined elsewhere
+    }
+
+    if (!cleaned) {
+      return;
+    }
+
+    // Duplicate message handling logic (assuming functions are defined elsewhere)
+    if (relayed && typeof verifyOriginalNewIncomingMessage === 'function' && !verifyOriginalNewIncomingMessage(cleaned, true)) {
+       if (data.bot) {
+         return null;
+       }
+       if (typeof checkExactDuplicateAlreadyRelayed === 'function' && checkExactDuplicateAlreadyRelayed(cleaned, data.textonly, data.tid, false)) {
+         return;
+       }
+    } else if (!fakechat && typeof checkExactDuplicateAlreadyRelayed === 'function' && checkExactDuplicateAlreadyRelayed(cleaned, data.textonly, data.tid, false)) {
+       return null;
+    }
+
+    // Bot handling
+    let botname = "🤖💬";
+    if (settings.ollamabotname && settings.ollamabotname.textsetting) {
+      botname = settings.ollamabotname.textsetting.trim();
+    }
+
+    let username = "";
+    let isBot = false;
+    // Make sure cleaned is a string before calling startsWith
+    if (typeof cleaned === 'string' && !settings.noollamabotname && cleaned.startsWith(botname + ":")) {
+        cleaned = cleaned.replace(botname + ":", "").trim();
+        username = botname;
+        isBot = true;
+    }
+
+    // Prepare the data payload to be sent
+    // It's good practice to create a new object to avoid modifying the original `data` object directly
+    // unless intended.
+    const payloadData = {
+        ...data, // Copy original data
+        chatname: username || data.chatname || data.userid || "Host⚡",
+        isBot: isBot,
+        chatmessage: cleaned,
+        // Add any other relevant info Streamer.bot action might need
+        source: "SocialStream.Ninja", // Explicitly add source
+        originalPlatform: data.type || "unknown" // Preserve original platform info
+    };
+
+
+    console.log(`Sending message event to Streamer.bot: ${payloadData.chatmessage} (from ${payloadData.chatname})`);
+
+    // --- CORE CHANGE HERE ---
+    // Always use the DoAction method if an Action ID is provided.
+    if (settings?.streamerbotactionid?.textsetting) {
+      const actionId = settings.streamerbotactionid.textsetting;
+      console.log(`Triggering Streamer.bot Action ID: ${actionId}`);
+
+      // Pass the prepared chat data as an argument named 'chatData' to the action
+      const args = {
+          chatData: payloadData
+      };
+
+      return streamerbotClient.doAction(actionId, args);
+
+    } else {
+       // If no Action ID is set, log a warning and do nothing.
+       // Direct chat injection via 'ChatMessage' request is unreliable.
+       console.warn("Streamer.bot Action ID is not set in SocialStream.Ninja settings. Cannot process message in Streamer.bot.");
+       // Optional: You could attempt the ChatMessage request here, but include a warning that it likely won't work as expected.
+       // console.log("Attempting direct ChatMessage injection (experimental, may not display in SB chat):", payloadData);
+       // return streamerbotClient.sendToChatSystem(payloadData); // This is the function that sends `request: "ChatMessage"`
+       return false; // Indicate message wasn't processed via Action
+    }
+  } catch (e) {
+    console.warn("Error in sendToStreamerBot:", e);
+    return false;
+  }
+}
+
+function initializeStreamerbot() {
+  // Only initialize if settings are configured
+  if (!settings.streamerbot) {
+    return;
+  }
+  
+  // Close any existing connection
+  if (streamerbotClient) {
+    streamerbotClient.disconnect();
+  }
+  
+  // Get configuration from settings
+  const wsUrl = settings?.streamerbotendpoint?.textsetting || 'ws://127.0.0.1:8080';
+  const password = settings?.streamerbotpassword?.textsetting || '';
+  
+  console.log(`Initializing Streamer.bot with URL: ${wsUrl} (password ${password ? 'provided' : 'not provided'})`);
+  
+  // Create new client with debug enabled during troubleshooting
+  streamerbotClient = new StreamerbotWebsocketClient({
+    url: wsUrl,
+    password: password,
+    debug: true, // Enable debug logging while troubleshooting
+    autoReconnect: true,
+    reconnectInterval: 5000,
+    maxReconnectAttempts: 3, // Limit reconnect attempts to prevent excessive logging
+    
+    onConnected: () => {
+      console.log("Connected to Streamer.bot");
+    },
+    onDisconnected: (event) => {
+      console.log(`Disconnected from Streamer.bot: ${event?.code} ${event?.reason}`);
+    },
+    onAuthenticated: () => {
+      console.log("Authenticated with Streamer.bot");
+      
+      // Subscribe to events after successful authentication
+      streamerbotClient.subscribe([
+        'Twitch.ChatMessage',
+        'YouTube.ChatMessage',
+        'Raw'
+      ]);
+    },
+    onAuthFailed: (data) => {
+      console.warn("Authentication with Streamer.bot failed:", data);
+    },
+    onMessage: (data) => {
+      console.log("Received message from Streamer.bot:", data);
+    }
+  });
+  
+  // Connect to the WebSocket server
+  streamerbotClient.connect();
+  
+  return streamerbotClient;
+}
+
+
+function handleStreamerBotSettingsChange() {
+  console.log("Streamer.bot settings changed:", {
+    enabled: settings.streamerbot,
+    endpoint: settings?.streamerbotendpoint?.textsetting,
+    password: settings?.streamerbotpassword?.textsetting ? '(password set)' : '(no password)',
+    actionID: settings?.streamerbotactionid?.textsetting
+  });
+  
+  if (settings.streamerbot) {
+    initializeStreamerbot();
+  } else if (streamerbotClient) {
+    streamerbotClient.disconnect();
+    streamerbotClient = null;
+  }
 }
 
 function sendAllToDiscord(data) {
@@ -6812,14 +7480,6 @@ async function applyBotActions(data, tab = false) {
 		messageCounter += 1;
 		data.id = messageCounter;
 	}
-	
-/* 	if (settings.storeBSky && data.userid && ((data.type == "x") || (data.type == "twitter"))){
-		var matchedBSky = extractBskyUsername(data.chatname) || extractBskyUsername(data.chatmessage);
-		if (matchedBSky){
-			BSky[data.userid] = matchedBSky;
-			localStorage.setItem("x2bsky",JSON.stringify(BSky));
-		}
-	} */
 
 	try {
 		
@@ -6896,7 +7556,7 @@ async function applyBotActions(data, tab = false) {
 			}
 			delete settings.mynameext;
 		}
-		if (!data.bot && settings.botnamesext?.textsetting && (data.chatname || data.userid)) {
+		if (!data.bot && settings.botnamesext?.textsetting && (data.chatname || data.userid)) { 
 			try {
 				const userIdentifier = (data.userid || data.chatname || "").toLowerCase().trim();
 				if (!userIdentifier) return;
@@ -7205,7 +7865,7 @@ async function applyBotActions(data, tab = false) {
 				return null;
 			}
 			
-			if (!data.bot) {
+			if (!data.bot && (!settings.relayhostonly || data.host)) {
 				//messageTimeout = Date.now();
 				var msg = {};
 				
@@ -7215,11 +7875,13 @@ async function applyBotActions(data, tab = false) {
 				// this should be ideall HTML stripped
 				if (tab) {
 					msg.url = tab.url;
-				}
+				} 
 
 				let tmpmsg = sanitizeRelay(data.chatmessage, data.textonly).trim();
 				if (tmpmsg) {  
-					if (data.chatname){
+					if (settings.nosaid){
+						msg.response = tmpmsg;
+					} else if (data.chatname){
 						msg.response = sanitizeRelay(data.chatname, true, miscTranslations.someone) + miscTranslations.said + tmpmsg; 
 					} else if (data.type){
 						msg.response = data.type.replace(/\b\w/g, c => c.toUpperCase())+": " + tmpmsg;
@@ -8007,55 +8669,60 @@ async function fetchData(url) {
 }
 
 window.onload = async function () {
-	let programmedSettings = await fetchData("settings.json"); // allows you to load the settings from a file.
-	if (programmedSettings && typeof programmedSettings === "object") {
-		log("Loading override settings via settongs.json");
-		loadSettings(programmedSettings, true);
-	} else {
-		log("Loading settings from the main file into the background.js");
-		chrome.storage.sync.get(properties, function (item) { // sync shouldn't have our settings ; just stream ID and current extension state
-			// we load this at the end, so not to have a race condition loading MIDI or whatever else. (essentially, __main__)
-			
-			//console.warn(item);
-			
-			//log("properties", item);
-			if (isSSAPP && item) {
-				loadSettings(item, false); 
-				return;
-			}
-			
-			if (item?.settings) {
-				// ssapp
-				alert("upgrading from old storage structure format to new...");
-				chrome.storage.sync.remove(["settings"], function (Items) {
-					// ignored
-					log("upgrading from sync to local storage");
-				});
-				chrome.storage.local.get(["settings"], function (item2) {
-					if (item2?.settings){
-						item = [...item, ...item2];
-					}
-					if (item?.settings){
-						chrome.storage.local.set({
-							settings: item.settings
-						});
-					}
-					if (item){
-						loadSettings(item, false);
-					}
-				});
-				
-			} else {
-				loadSettings(item, false);
-				chrome.storage.local.get(["settings"], function (item2) {
-					if (item2){
-						//console.warn(item2);
-						loadSettings(item2, false);
-					}
-				});
-			}
-		});
-	}
+    let programmedSettings = await fetchData("settings.json");
+    if (programmedSettings && typeof programmedSettings === "object") {
+        log("Loading override settings via settongs.json");
+        loadSettings(programmedSettings, true);
+    } else {
+        log("Loading settings from the main file into the background.js");
+        chrome.storage.sync.get(properties, function (item) {
+            if (isSSAPP && item) {
+                loadSettings(item, false); 
+                
+                // Initialize file handles after settings are loaded
+                initializeFileHandles();
+                return;
+            }
+            
+            if (item?.settings) {
+                alert("upgrading from old storage structure format to new...");
+                chrome.storage.sync.remove(["settings"], function (Items) {
+                    log("upgrading from sync to local storage");
+                });
+                chrome.storage.local.get(["settings"], function (item2) {
+                    if (item2?.settings){
+                        item = [...item, ...item2];
+                    }
+                    if (item?.settings){
+                        chrome.storage.local.set({
+                            settings: item.settings
+                        });
+                    }
+                    if (item){
+                        loadSettings(item, false);
+                        
+                        // Initialize file handles after settings are loaded
+                        if (isSSAPP) {
+                            initializeFileHandles();
+                        }
+                    }
+                });
+                
+            } else {
+                loadSettings(item, false);
+                chrome.storage.local.get(["settings"], function (item2) {
+                    if (item2){
+                        loadSettings(item2, false);
+                        
+                        // Initialize file handles after settings are loaded
+                        if (isSSAPP) {
+                            initializeFileHandles();
+                        }
+                    }
+                });
+            }
+        });
+    }
 };
 
 var jokes = [
@@ -10335,25 +11002,60 @@ let fileContentTicker = "";
 let fileSizeTicker = 0;
 let monitorInterval = null;
 
- 
 async function selectTickerFile() {
-	
-	fileHandleTicker = await window.showOpenFilePicker({
-		types: [{
-			description: 'Text Files',
-			accept: {'text/plain': ['.txt']},
-		}],
-	});
-	
-	if (!isSSAPP){
-		fileHandleTicker = fileHandleTicker[0];
-	}
-	 
-	try {
-		await loadFileTicker();
-	} catch(e){}
-	
-};
+    fileHandleTicker = await window.showOpenFilePicker({
+        types: [{
+            description: 'Text Files',
+            accept: {'text/plain': ['.txt']},
+        }],
+    });
+    
+    if (!isSSAPP) {
+        fileHandleTicker = fileHandleTicker[0];
+    } else if (typeof fileHandleTicker === "string") {
+        // Store file path when isSSAPP is true
+        localStorage.setItem("tickerFilePath", fileHandleTicker);
+    }
+     
+    try {
+        await loadFileTicker();
+    } catch(e){}
+}
+async function initializeFileHandles() {
+    if (!isSSAPP) return;
+    
+    // Restore main file handle
+    const savedFilePath = localStorage.getItem("savedFilePath");
+    if (savedFilePath) {
+        newFileHandle = savedFilePath;
+    }
+    
+    // Restore saved names file handle
+    const savedNamesFilePath = localStorage.getItem("savedNamesFilePath");
+    if (savedNamesFilePath) {
+        newSavedNamesFileHandle = savedNamesFilePath;
+        try {
+            // Load the existing names
+            const data = await ipcRenderer.invoke("read-from-file", savedNamesFilePath);
+            if (data) {
+                uniqueNameSet = data.split("\r\n").filter(name => name.trim() !== "");
+            }
+        } catch(e) {
+            console.warn("Could not load saved names file:", e);
+        }
+    }
+    
+    // Restore ticker file handle
+    const tickerFilePath = localStorage.getItem("tickerFilePath");
+    if (tickerFilePath && settings.ticker) {
+        fileHandleTicker = tickerFilePath;
+        try {
+            await loadFileTicker();
+        } catch(e) {
+            console.warn("Could not load ticker file:", e);
+        }
+    }
+}
 
 function processTicker(){ 
 	if (fileContentTicker && settings.ticker){
