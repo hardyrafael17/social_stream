@@ -1,0 +1,68 @@
+class SharedIO {
+    constructor() {
+        this.worker = new SharedWorker('/widget/sharedio/sharedioworker.js');
+        this.worker.port.start();
+        this.eventListener = [];
+        this.connectTimeout = null;
+
+        this.worker.port.onmessage = (e) => {
+            let data = e.data;
+
+            switch (data.name) {
+                case "connectCallback":
+                    console.info("[SharedIO] Connected!", data.params);
+                    if (this.connectTimeout) {
+                        clearTimeout(this.connectTimeout);
+                    }
+                    break;
+                case "ioEvent":
+                    this.eventListener.filter(x => x.eventName === data.params.eventName).forEach(listener => {
+                        listener.listenerFn.apply(this, data.params.eventData)
+                    })
+                    break;
+            }
+        }
+
+        window.addEventListener('beforeunload', () => {
+            this.sendWorkerCommand("disconnect");
+        })
+    }
+
+    sendWorkerCommand(commandName, commandParams = {}) {
+        this.worker.port.postMessage({
+            name: commandName,
+            params: commandParams
+        });
+    }
+
+    connect(channelId, onTimeout) {
+        this.connectTimeout = setTimeout(() => {
+            console.warn("[SharedIO] connect timeout!");
+            if (typeof onTimeout === "function") {
+                onTimeout();
+            }
+        }, 10000);
+        
+        this.sendWorkerCommand("connect", { channelId });
+    }
+
+    on(eventName, listenerFn) {
+        this.eventListener.push({ eventName, listenerFn });
+        this.sendWorkerCommand("attachEvent", { eventName });
+    }
+
+    emit(eventName, eventData) {
+        this.sendWorkerCommand("emit", { eventName, eventData });
+    }
+}
+
+// const myWorker = new SharedWorker('worker.js');
+
+// myWorker.port.start();
+
+// myWorker.port.onmessage = (e) => {
+//     document.write(e.data);
+//     document.close();
+// }
+
+// myWorker.port.postMessage([5, 5]);
