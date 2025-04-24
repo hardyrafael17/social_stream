@@ -3668,7 +3668,7 @@ function updateDocumentList(documents = []) {
 try {
 	chrome.runtime.onMessage.addListener(
 		function(request, sender, sendResponse) {
-			log("INCOMING MESSAGE--------------------------");
+			log("INCOMING MESSAGE--------------------------", request); // Log the whole request
 			if (request.forPopup) {
 				log("Message received in popup:", request.forPopup);
 				if (request.forPopup.documents){
@@ -3686,6 +3686,45 @@ try {
 } catch(e){
 	log(e);
 }
+
+// try {
+//     chrome.runtime.onMessage.addListener(
+//         function(request, sender, sendResponse) {
+//             log("INCOMING MESSAGE--------------------------", request); // Log the whole request
+
+//             // *** START MODIFICATION ***
+
+//             // Check for the new message type from background.js
+//             if (request && request.messageFromBackground) {
+//                 console.log("Popup specifically received:", request.messageFromBackground);
+//                 // Optional: Send a response back
+//                 sendResponse({ status: "Message from background received by popup!" });
+
+//             // Check for the original message type
+//             } else if (request && request.forPopup) {
+//                 log("Popup received forPopup:", request.forPopup);
+//                 if (request.forPopup.documents) {
+//                     updateDocumentList(request.forPopup.documents);
+//                 }
+//                 if (request.forPopup.alert) {
+//                     alert(request.forPopup.alert);
+//                 }
+//                 // Handle the message data here
+//                 sendResponse({ status: "forPopup message processed by popup" });
+
+//             // Handle other potential message types if necessary
+//             } else {
+//                  log("Popup received unknown message format");
+//                  // Optional: Send a default response if needed
+//                  // sendResponse({status: "Unknown message type received"});
+//             }
+
+//             // *** END MODIFICATION ***
+//         }
+//     );
+// } catch (e) {
+//     log(e);
+// }
 
 function createCommandEntry(command = '', url = '') {
     function encodeHTML(str) {

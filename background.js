@@ -7,6 +7,67 @@ try {
 	}
 } catch(e){}
 
+/* Custom function to send data to the dock */
+function sendMessageToDock() {
+    console.log("Background: Sending test message to dock");
+    const messageToSend = {
+        // Use a unique property to identify messages from the background
+        customMessageFromBackground: "Hello from background.js!" 
+    };
+    // Use the existing function to broadcast
+    sendDataP2P(messageToSend); 
+}
+
+//  Example trigger: Send every second
+// setInterval(()=> {
+// 	sendMessageToDock()
+// }, 1000)
+
+function sendMessageToExtensionComponents() {
+    console.log("Background: Sending test message to extension components (like popup)");
+    const messageToSend = {
+        // Use the same unique property
+        customMessageFromBackground: "Hello Popup from background.js!"
+    };
+
+    // Send the message to other parts of the extension
+    chrome.runtime.sendMessage(messageToSend, function(response) {
+        if (chrome.runtime.lastError) {
+            // Handle potential errors, e.g., if the popup isn't open
+            // console.log("Could not send message:", chrome.runtime.lastError.message);
+        } else {
+            // Optional: Handle response from the popup/other components
+            // console.log("Response from component:", response);
+        }
+    });
+}
+
+// Example trigger: Send every second
+// setInterval(sendMessageToExtensionComponents, 1000);
+
+// If you still need to send via P2P for the dock/overlays:
+function sendTestMessageToDockAndPopup() {
+    console.log("Background: Sending test message via P2P and Extension Runtime");
+    const messageToSend = {
+       customMessageFromBackground: "Hello from background.js!"
+    };
+    // Send via P2P/WebSocket for dock/overlays
+    sendDataP2P(messageToSend);
+    // Send via runtime message for popup/options
+    // chrome.runtime.sendMessage(messageToSend, function(response) {
+    //     if (chrome.runtime.lastError) {
+    //         // Handle potential errors, e.g., if the popup isn't open
+    //         console.log("Could not send message:", chrome.runtime.lastError.message);
+    //     } else {
+    //         // Optional: Handle response from the popup/other components
+    //         console.log("Response from component:", response);
+    //     }
+    // });
+}
+
+setInterval(sendTestMessageToDockAndPopup, 1000);
+
+
 var isExtensionOn = false;
 var iframe = null;
 
@@ -6550,6 +6611,7 @@ function blockUser(data){
 
 eventer(messageEvent, async function (e) {
 	// iframe wno't be enabled if isExtensionOn is off, so allow this.
+	// sendMessageToDock(e.data, e.origin, e.source, e.data.UUID || false, "any message"); // send to the dock if we can
 	if (!iframe) {
 		return;
 	}
@@ -6558,6 +6620,35 @@ eventer(messageEvent, async function (e) {
 	}
 	if (e.data && typeof e.data == "object") {
 		if ("dataReceived" in e.data && "overlayNinja" in e.data.dataReceived) {
+            // *** START MODIFICATION ***
+			sendMessageToDock('test')
+			console.log('Background received data:', e.data.dataReceived.overlayNinja);
+            const receivedPayload = e.data.dataReceived.overlayNinja;
+
+            // Check if it's our specific command from the dock
+            if (receivedPayload && receivedPayload.backgroundCommand) {
+                console.log("Background received command:", receivedPayload.backgroundCommand);
+
+                const cmdData = receivedPayload.backgroundCommand;
+
+                // --- ACT ON THE COMMAND HERE ---
+                if (cmdData.command === "alert") {
+                    messagePopup({ alert: `Dock command received: ${cmdData.args}` });
+                } else if (cmdData.command === "toggleState") {
+                    isExtensionOn = !isExtensionOn;
+                    updateExtensionState();
+                    console.log("Background: Toggled extension state to", isExtensionOn);
+                } else if (cmdData.command === "log") {
+                    console.log("Dock Log:", cmdData.args);
+                }
+                // Add more 'else if' blocks for other commands
+                // --- END ACTION AREA ---
+
+                // We've handled it, potentially stop further processing
+                return; 
+            }
+            // *** END MODIFICATION ***
+
 			processIncomingRequest(e.data.dataReceived.overlayNinja, e.data.UUID);
 		} else if ("action" in e.data) {
 			// this is from vdo.ninja, not socialstream.
