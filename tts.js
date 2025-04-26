@@ -487,6 +487,7 @@ TTS.configure = function(urlParams) {
     TTS.googleSettings.pitch = urlParams.has("googlepitch") ? parseFloat(urlParams.get("googlepitch")) || 0 : 0;
     TTS.googleSettings.audioProfile = urlParams.get("googleaudioprofile") || false;
     TTS.googleSettings.voiceName = urlParams.get("voicegoogle") || false;
+	TTS.googleSettings.lang = urlParams.get("googlelang") || false;
 
     // ElevenLabs settings
     TTS.elevenLabsSettings.latency = urlParams.has("elevenlatency") ? parseInt(urlParams.get("elevenlatency")) || 0 : TTS.voiceLatency;
@@ -796,45 +797,45 @@ TTS.speak = function(text, allow = false) {
 	TTS.initAudioContext();
 
     // Use the selected provider
-    switch (TTS.TTSProvider) {
-        case "kokoro":
-            if (!TTS.premiumQueueActive) {
-                TTS.kokoroTTS(text);
-            } else {
-                TTS.premiumQueueTTS.push(text);
-            }
-            return;
-        case "google":
-            if (TTS.GoogleAPIKey) {
-                if (!TTS.premiumQueueActive) {
-                    TTS.googleTTS(text);
-                } else {
-                    TTS.premiumQueueTTS.push(text);
-                }
-                return;
-            }
-            break;
-        case "elevenlabs":
-            if (TTS.ElevenLabsKey) {
-                if (!TTS.premiumQueueActive) {
-                    TTS.ElevenLabsTTS(text);
-                } else {
-                    TTS.premiumQueueTTS.push(text);
-                }
-                return;
-            }
-            break;
-        case "speechify":
-            if (TTS.SpeechifyAPIKey) {
-                if (!TTS.premiumQueueActive) {
-                    TTS.SpeechifyTTS(text);
-                } else {
-                    TTS.premiumQueueTTS.push(text);
-                }
-                return;
-            }
-            break;
-    }
+	switch (TTS.TTSProvider) {
+		case "kokoro":
+			if (!TTS.premiumQueueActive) {
+				TTS.kokoroTTS(text);
+			} else {
+				TTS.premiumQueueTTS.push(text);
+			}
+			return;
+		case "google":
+			if (TTS.GoogleAPIKey) {
+				if (!TTS.premiumQueueActive) {
+					TTS.googleTTS(text);
+				} else {
+					TTS.premiumQueueTTS.push(text);
+				}
+				return;
+			}
+			return; // Change from break to return
+		case "elevenlabs":
+			if (TTS.ElevenLabsKey) {
+				if (!TTS.premiumQueueActive) {
+					TTS.ElevenLabsTTS(text);
+				} else {
+					TTS.premiumQueueTTS.push(text);
+				}
+				return;
+			}
+			return; // Change from break to return
+		case "speechify":
+			if (TTS.SpeechifyAPIKey) {
+				if (!TTS.premiumQueueActive) {
+					TTS.SpeechifyTTS(text);
+				} else {
+					TTS.premiumQueueTTS.push(text);
+				}
+				return;
+			}
+			return; // Change from break to return
+	}
 
     if (!TTS.voices && TTS.voices === null) {
         return;
@@ -1360,7 +1361,7 @@ TTS.googleTTS = function(tts) {
                 text: tts
             },
             voice: {
-                languageCode: TTS.speechLang.toLowerCase(),
+                languageCode: TTS.googleSettings.lang || TTS.speechLang,
                 name: TTS.googleSettings.voiceName || "en-GB-Standard-A",
                 ssmlGender: TTS.voiceGender ? TTS.voiceGender.toUpperCase() : "FEMALE"
             },

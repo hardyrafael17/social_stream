@@ -113,6 +113,22 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
+	
+	document.querySelectorAll('img').forEach(img => {
+		
+		if (window.location.protocol === 'file:') {
+			return;
+		}
+		  
+		if (img.complete && img.naturalHeight === 0) {
+		  img.style.display = 'none';
+		}
+		
+		img.addEventListener('error', function() {
+		  this.style.display = 'none';
+		});
+	});
+	  
 
 	
 	    // Dark Mode Toggle Logic - Fixed Version
@@ -151,7 +167,7 @@ document.addEventListener('DOMContentLoaded', function() {
             updateTheme(!isDarkMode);
         });
     }
-    
+	
     // Listen for system theme changes
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
         // Only apply if user hasn't set a preference
