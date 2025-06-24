@@ -1,5 +1,7 @@
 (function () {
-	const messageHistory = new Set();
+	
+	var isExtensionOn = true;
+const messageHistory = new Set();
 	var lastName = "";
 	var lastchatimg = "";
 	var newest = 0;
@@ -238,6 +240,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("webex");	return;	}
 				if ("focusChat" == request){
 					document.querySelector("div[class^='style-text-container-']>textarea").focus();
 					sendResponse(true);

@@ -5,3 +5,6 @@ goodwords.txt
 settings.json
 .DS_Store
 *.py
+.claude/
+.claude
+*.backup

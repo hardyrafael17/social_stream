@@ -19,21 +19,43 @@ class MessageStoreDB {
             userMessages: new Map(),
             lastUpdate: 0
         };
+		
+		this.existenceCache = {
+            entries: new Map(),
+            maxSize: options.existenceCacheSize || 100,
+            ttl: options.existenceCacheTTL || 30 * 60 * 1000  // 30 minutes default
+        };
         
         this.initPromise = this.initDatabase();
     }
 
     async initDatabase() {
         return new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.dbName, 3);
+            const request = indexedDB.open(this.dbName, 4);
             
             request.onupgradeneeded = event => {
                 const db = event.target.result;
+                let store;
+                
                 if (!db.objectStoreNames.contains(this.storeName)) {
-                    const store = db.createObjectStore(this.storeName, { keyPath: 'id', autoIncrement: true });
+                    store = db.createObjectStore(this.storeName, { keyPath: 'id', autoIncrement: true });
                     store.createIndex('timestamp', 'timestamp');
                     store.createIndex('user_timestamp', ['chatname', 'timestamp']);
                     store.createIndex('user_type_timestamp', ['chatname', 'type', 'timestamp']);
+                } else {
+                    // Get existing store for upgrades
+                    const transaction = event.currentTarget.transaction;
+                    store = transaction.objectStore(this.storeName);
+                }
+                
+                // Add userid indexes for version 4
+                if (event.oldVersion < 4 && store) {
+                    if (!store.indexNames.contains('user_id_timestamp')) {
+                        store.createIndex('user_id_timestamp', ['userid', 'timestamp']);
+                    }
+                    if (!store.indexNames.contains('user_id_type_timestamp')) {
+                        store.createIndex('user_id_type_timestamp', ['userid', 'type', 'timestamp']);
+                    }
                 }
             };
             
@@ -53,39 +75,62 @@ class MessageStoreDB {
     }
 
 	async addMessage(message) {
-		const db = await this.ensureDB();
-		const now = Date.now();
-		
-		const cloned = {...message};
-		
-		if (cloned.id){
-			cloned.mid = cloned.id;
-			delete cloned.id;   // Remove id as it will be auto-generated
-		}
-		
-		const messageData = { 
-			...cloned,
-			timestamp: now,
-			expiresAt: now + (this.daysToKeep * MS_PER_DAY)
-		};
+        const db = await this.ensureDB();
+        const now = Date.now();
+        
+        const cloned = {...message};
+        
+        if (cloned.id){
+            cloned.mid = cloned.id;
+            delete cloned.id;   // Remove id as it will be auto-generated
+        }
+        
+        // Set expiration only if unlimiteDB is not enabled
+        const messageData = { 
+            ...cloned,
+            timestamp: now,
+            expiresAt: now + (this.daysToKeep * MS_PER_DAY)
+        };
+        
+        // Log what we're storing
+        console.log("Storing message with userid:", messageData.userid, "chatname:", messageData.chatname, "type:", messageData.type);
 
-		return new Promise((resolve, reject) => {
-			const tx = db.transaction(this.storeName, 'readwrite');
-			const store = tx.objectStore(this.storeName);
-			
-			const request = store.add(messageData);
-			
-			request.onsuccess = () => {
-				// Get the auto-generated ID from the request
-				messageData.id = request.result;
-				message.idx = request.result;;
-				this.updateCache(messageData);
-				resolve(request.result); 
-			};
-			
-			request.onerror = () => reject(request.error);
-		});
-	}
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readwrite');
+            const store = tx.objectStore(this.storeName);
+            
+            const request = store.add(messageData);
+            
+            request.onsuccess = () => {
+                // Get the auto-generated ID from the request
+                messageData.id = request.result;
+                message.idx = request.result;
+                this.updateCache(messageData);
+                
+                // Cache that this user now exists
+                const userIdentifier = messageData.userid || messageData.chatname;
+                if (userIdentifier && messageData.type) {
+                    const cacheKey = `${userIdentifier}:${messageData.type}`;
+                    const now = Date.now();
+                    this.existenceCache.entries.set(cacheKey, {
+                        exists: true,
+                        timestamp: now
+                    });
+                    
+                    // Trim cache if needed
+                    if (this.existenceCache.entries.size > this.existenceCache.maxSize) {
+                        const oldestKey = Array.from(this.existenceCache.entries.keys())[0];
+                        this.existenceCache.entries.delete(oldestKey);
+                    }
+                    console.log("Cached user as existing:", cacheKey);
+                }
+                
+                resolve(request.result); 
+            };
+            
+            request.onerror = () => reject(request.error);
+        });
+    }
 
 	async updateMessage(idx, updatedResponse) {
 		if (!idx || !updatedResponse) return null;
@@ -113,11 +158,11 @@ class MessageStoreDB {
         recent.unshift(message);
         if (recent.length > this.cacheSize) recent.pop();
         
-        if (!userMessages.has(message.chatname)) {
-            userMessages.set(message.chatname, []);
+        if (!userMessages.has(message.userid || message.chatname)) {
+            userMessages.set(message.userid || message.chatname, []);
         }
         
-        const userCache = userMessages.get(message.chatname);
+        const userCache = userMessages.get(message.userid || message.chatname);
         userCache.unshift(message);
         if (userCache.length > this.cacheSize) userCache.pop();
         
@@ -153,32 +198,125 @@ class MessageStoreDB {
             };
         });
     }
-
-    async getUserMessages(chatname, type, page = 0, pageSize = 100) {
-        const db = await this.ensureDB();
-        const now = Date.now();
-        
-        if (page === 0 && this.cache.userMessages.has(chatname)) {
-            const cached = this.cache.userMessages.get(chatname);
-            if (cached.length >= pageSize && (now - this.cache.lastUpdate) < this.cacheDuration) {
-                return cached.slice(0, pageSize);
-            }
-        }
+	
+	async checkUserTypeExists(chatname, type) {
+		const cacheKey = `${chatname}:${type}`;
+		const now = Date.now();
+		
+		// Check cache first
+		if (this.existenceCache.entries.has(cacheKey)) {
+			const entry = this.existenceCache.entries.get(cacheKey);
+			if (now - entry.timestamp < this.existenceCache.ttl) {
+				return entry.exists;
+			}
+			// Expired entry, remove from cache
+			this.existenceCache.entries.delete(cacheKey);
+		}
+		
+		// If database is disabled, update cache as not existing and return false
+		if (settings?.disableDB) {
+			// Update cache to indicate this user doesn't exist (since we can't check)
+			this.existenceCache.entries.set(cacheKey, {
+				exists: false,
+				timestamp: now
+			});
+			
+			// Trim cache if needed
+			if (this.existenceCache.entries.size > this.existenceCache.maxSize) {
+				const oldestKey = Array.from(this.existenceCache.entries.keys())[0];
+				this.existenceCache.entries.delete(oldestKey);
+			}
+			
+			return false;
+		}
+		
+		// Not in cache and database enabled, check database
+		const db = await this.ensureDB();
+		
+		return new Promise((resolve) => {
+			const tx = db.transaction(this.storeName, 'readonly');
+			const store = tx.objectStore(this.storeName);
+			
+			// Check if this looks like a userid (starts with UC for YouTube, or other patterns)
+			// This is a simple heuristic - you could make this more sophisticated
+			const looksLikeUserId = chatname && (
+				chatname.startsWith('UC') || // YouTube channel ID
+				chatname.match(/^[A-Z0-9_-]{10,}$/i) // Other platform IDs
+			);
+			
+			// Choose the appropriate index
+			let index;
+			let range;
+			
+			if (looksLikeUserId && store.indexNames.contains('user_id_type_timestamp')) {
+				// Try userid index first
+				console.log("Using userid index for:", chatname, type);
+				index = store.index('user_id_type_timestamp');
+				range = IDBKeyRange.bound([chatname, type, 0], [chatname, type, now]);
+			} else {
+				// Use chatname index
+				console.log("Using chatname index for:", chatname, type);
+				index = store.index('user_type_timestamp');
+				range = IDBKeyRange.bound([chatname, type, 0], [chatname, type, now]);
+			}
+			
+			const countRequest = index.count(range);
+			
+			countRequest.onsuccess = () => {
+				const exists = countRequest.result > 0;
+				console.log("Count result:", countRequest.result, "exists:", exists);
+				
+				// Don't cache the result here - we'll cache after storing the message
+				// This prevents caching "false" results that become stale immediately
+				
+				resolve(exists);
+			};
+			
+			countRequest.onerror = () => {
+				console.error('Error counting user type records:', countRequest.error);
+				resolve(false);
+			};
+		});
+	}
+    clearExistenceCache() {
+        this.existenceCache.entries.clear();
+    }
+	
+	async getUserMessages(chatname, type, page = 0, pageSize = 100) {
+		const db = await this.ensureDB();
+		const now = Date.now();
 		
 		if (settings?.disableDB) return [];
-
-        return new Promise((resolve) => {
+		
+		return new Promise((resolve) => {
             const tx = db.transaction(this.storeName, 'readonly');
-            const index = tx.objectStore(this.storeName).index(
-                type ? 'user_type_timestamp' : 'user_timestamp'
+            const store = tx.objectStore(this.storeName);
+            
+            // Check if this looks like a userid
+            const looksLikeUserId = chatname && (
+                chatname.startsWith('UC') || // YouTube channel ID
+                chatname.match(/^[A-Z0-9_-]{10,}$/i) // Other platform IDs
             );
+            
+            // Choose the appropriate index
+            let index;
+            let range;
+            
+            if (looksLikeUserId && store.indexNames.contains('user_id_type_timestamp') && store.indexNames.contains('user_id_timestamp')) {
+                index = type ? store.index('user_id_type_timestamp') : store.index('user_id_timestamp');
+                range = type ?
+                    IDBKeyRange.bound([chatname, type, 0], [chatname, type, now]) :
+                    IDBKeyRange.bound([chatname, 0], [chatname, now]);
+            } else {
+                index = type ? store.index('user_type_timestamp') : store.index('user_timestamp');
+                range = type ?
+                    IDBKeyRange.bound([chatname, type, 0], [chatname, type, now]) :
+                    IDBKeyRange.bound([chatname, 0], [chatname, now]);
+            }
+            
             const messages = [];
             const skip = page * pageSize;
             let count = 0;
-            
-            const range = type ?
-                IDBKeyRange.bound([chatname, type, 0], [chatname, type, now]) :
-                IDBKeyRange.bound([chatname, 0], [chatname, now]);
                 
             index.openCursor(range, 'prev').onsuccess = event => {
                 const cursor = event.target.result;
@@ -204,6 +342,12 @@ class MessageStoreDB {
 
     scheduleCleanup() {
         const cleanup = async () => {
+            // Skip cleanup if unlimiteDB is enabled
+            if (settings?.unlimiteDB) {
+                console.log('Unlimited DB mode enabled, skipping cleanup');
+                return;
+            }
+            
             const db = await this.ensureDB();
             const now = Date.now();
             
@@ -553,6 +697,7 @@ class MessageStoreMigration {
 
         return {
             chatname: oldMessage.chatname || '',
+			userid: oldMessage.userid || '',
             chatmessage: oldMessage.chatmessage || oldMessage.message || '',
             chatimg: oldMessage.chatimg || '',
             hasDonation: oldMessage.hasDonation || '',

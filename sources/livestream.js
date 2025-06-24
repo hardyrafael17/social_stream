@@ -1,6 +1,8 @@
 (function () {
 	 
-	function toDataURL(url, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		  
@@ -139,6 +141,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("livestream");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('#liveChatContainer').contentWindow.document.body.querySelector('textarea[ng-switch-when="message"]').focus();
 					sendResponse(true);

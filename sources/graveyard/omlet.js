@@ -1,5 +1,7 @@
 (function () {
-	function pushMessage(data){	  
+	
+	var isExtensionOn = true;
+function pushMessage(data){	  
 		try {
 			chrome.runtime.sendMessage(chrome.runtime.id, { "message": data }, function(e){});
 		} catch(e){}
@@ -193,6 +195,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("omlet");	return;	}
 				if ("focusChat" == request){
 					if (!document.querySelector("div[class^='textarea__chat-input-bar']")){
 						sendResponse(false);

@@ -1,5 +1,6 @@
 (function () {
 	
+	var isExtensionOn = true;
 	
 	async function fetchWithTimeout(URL, timeout=8000){ // ref: https://dmitripavlutin.com/timeout-fetch-request/
 		try {
@@ -149,6 +150,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("afreetv");return;	}
 				if ("focusChat" == request){
 					document.querySelector('textarea, #write_area').focus();
 					sendResponse(true);

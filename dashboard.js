@@ -126,7 +126,7 @@ function addLogMessage(message, isError = false) {
     debugOutput.scrollTop = debugOutput.scrollHeight;
     
     // Keep only the last 10 messages
-    while (debugOutput.children.length > 10) {
+    while (debugOutput.children.length > 30) {
         debugOutput.removeChild(debugOutput.firstChild);
     }
 }
@@ -192,26 +192,130 @@ function setupPeriodicUpdates() {
 
 // Intercept console logs
 function setupConsoleHook() {
-    const originalConsoleLog = console.warn;
-    const originalConsoleError = console.error;
+    const MAX_MESSAGE_LENGTH = 500; // Maximum characters per message
     
-    console.log = function() {
-        const message = Array.from(arguments).join(' ');
+    // Helper function to stringify and trim arguments
+    function formatArguments(args) {
+        return Array.from(args).map(arg => {
+            let str;
+            if (typeof arg === 'object') {
+                try {
+                    // Pretty print objects with 2-space indentation
+                    str = JSON.stringify(arg, null, 2);
+                } catch (e) {
+                    // Handle circular references or other stringify errors
+                    str = String(arg);
+                }
+            } else {
+                str = String(arg);
+            }
+            
+            // Trim to max length if needed
+            if (str.length > MAX_MESSAGE_LENGTH) {
+                str = str.substring(0, MAX_MESSAGE_LENGTH) + '... (truncated)';
+            }
+            return str;
+        }).join(' ');
+    }
+    
+    // Create new methods that preserve the call stack
+    const originalLog = console.log.bind(console);
+    const originalError = console.error.bind(console);
+    
+    console.log = (...args) => {
+        originalLog(...args);
+        const message = formatArguments(args);
         addLogMessage(message);
     };
     
-    console.error = function() {
-        originalConsoleError.apply(console, arguments);
-        const message = Array.from(arguments).join(' ');
+    console.error = (...args) => {
+        originalError(...args);
+        const message = formatArguments(args);
         addLogMessage(message, true);
     };
 }
 
-// Main initialization function
-function initDashboard() {
-    setupConsoleHook();
-    setupPeriodicUpdates();
+function showEditorView() {
+    document.getElementById("dash").style.display = 'none';
+    document.getElementById("editorstyle").removeAttribute("disabled");
+    
+    document.getElementById("editor").style.opacity = '0';
+    document.getElementById("editor").style.display = 'block';
+    
+    void document.getElementById("editor").offsetWidth;
+    document.getElementById("editor").style.opacity = '1';
+    
+    document.getElementById("dashstyle").setAttribute("disabled", "true");
+    
+    document.body.style.padding = '0';
+    document.body.style.overflow = 'hidden';
+   
 }
 
-// Start dashboard when DOM is ready
-document.addEventListener('DOMContentLoaded', initDashboard);
+function showDashboardView() {
+    document.getElementById("editor").style.display = 'none';
+    
+    document.getElementById("dashstyle").removeAttribute("disabled");
+    document.getElementById("dash").style.display = 'block';
+    
+    document.body.style.padding = '20px';
+    document.body.style.overflow = 'auto';
+    
+    // Close test panel if open
+    if (window.testOverlay && window.testPanel) {
+        window.testOverlay.style.display = 'none';
+        window.testPanel.style.display = 'none';
+    }
+    
+}
+
+function showEditorView() {
+    document.getElementById("dash").style.display = 'none';
+    document.getElementById("editorstyle").removeAttribute("disabled");
+    
+    document.getElementById("editor").style.opacity = '0';
+    document.getElementById("editor").style.display = 'block';
+    
+    void document.getElementById("editor").offsetWidth;
+    document.getElementById("editor").style.opacity = '1';
+    
+    document.getElementById("dashstyle").setAttribute("disabled", "true");
+    
+    document.body.style.padding = '0';
+    document.body.style.overflow = 'hidden';
+	
+}
+
+function setupReturnButton() {
+    const returnButton = document.getElementById('return-to-dashboard');
+    if (returnButton) {
+        returnButton.addEventListener('click', function() {
+            showDashboardView();
+        });
+    }
+	
+	const showEditorViewButton = document.getElementById('showEditorViewButton');
+    if (showEditorViewButton) {
+        showEditorViewButton.addEventListener('click', function() {
+            showEditorView();
+        });
+    }
+}
+// Main initialization function
+function initDashboard() {
+    if (new URLSearchParams(window.location.search).has('ssapp')) {
+        document.body.classList.add('ssapp');
+    }
+    document.getElementById("editorstyle").setAttribute("disabled", "true");
+    setupConsoleHook();
+    setupPeriodicUpdates();
+	setupReturnButton();
+}
+
+if (document.readyState === "complete" || document.readyState === "interactive") {
+    // DOM is already loaded
+    initDashboard();
+} else {
+    // DOM isn't loaded yet, wait for it
+    document.addEventListener("DOMContentLoaded", initDashboard);
+}

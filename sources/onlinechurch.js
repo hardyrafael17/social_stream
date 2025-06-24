@@ -1,5 +1,7 @@
 (function () {
-	try {
+	
+	var isExtensionOn = true;
+try {
 	
 	async function fetchWithTimeout(URL, timeout=8000){ // ref: https://dmitripavlutin.com/timeout-fetch-request/
 		try {
@@ -184,6 +186,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("onlinechurch");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('#publicchat textarea[placeholder][maxlength]').focus();
 					sendResponse(true);

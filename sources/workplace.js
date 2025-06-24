@@ -1,5 +1,7 @@
 (function() {
-	function pushMessage(data) {
+	
+	var isExtensionOn = true;
+function pushMessage(data) {
 		try {
 			chrome.runtime.sendMessage(chrome.runtime.id, {
 				"message": data
@@ -320,6 +322,7 @@
 	chrome.runtime.onMessage.addListener(
 		function(request, sender, sendResponse) {
 			try {
+				if ("getSource" == request){sendResponse("workplace");	return;	}
 				if ("focusChat" == request) {
 
 					var eles = document.querySelectorAll('[contenteditable="true"]');

@@ -4,6 +4,8 @@
 	//var channelName = "";
 	var isExtensionOn = true;
 	var videoId = urlParams.get("v") || false;
+	
+	var debugmode = urlParams.has("debug") || false;
 	try {
 		if (!videoId){
 			const parentUrl = window.top.location.href;
@@ -239,6 +241,10 @@
 					}
 				}
 				
+				if (emoteNode.alt) {
+					newImgAttributes += ` alt="${emoteNode.alt}" title="${emoteNode.alt}"`;
+				}
+				
 				pendingRegularEmote = `<img ${newImgAttributes}>`;
 			} else {
 				if (pendingSpace){
@@ -395,8 +401,7 @@
 	  return new Promise(resolve => setTimeout(resolve, ms));
 	}
 
-	async function processMessage(ele, wss = true, eventType=false) {
-		//console.log(ele);
+	async function processMessage(ele, eventType=false) {
 		if (!ele || !ele.isConnected){
 			return 1;
 		}
@@ -435,6 +440,8 @@
 					},2000);
 				}
 				//console.log(messageHistory);
+			} else if (eventType == "jeweldonation"){
+				// allow without an id.
 		    } else {
 				return 6; // no id.
 		    }
@@ -445,6 +452,8 @@
 		} catch (e) {}
 
 		ele.skip = true;
+		
+		//console.log(ele);
 		
 
 		var chatmessage = "";
@@ -640,17 +649,87 @@
 					}
 				}
 			} else if (giftedmemembership) {
-				hasMembership = getTranslation("sponsorship", "SPONSORSHIP");
-				chatmessage = getAllContentNodes(giftedmemembership);
-				eventType = "sponsorship";
+			  hasMembership = getTranslation("sponsorship", "SPONSORSHIP");
+			  chatmessage = getAllContentNodes(giftedmemembership);
+			  eventType = "sponsorship";
+			  
+			} else if (eventType === "giftpurchase") {
+			  try {
+				var giftedBy = ele.querySelector("#primary-text");
+				if (giftedBy) {
+				  var giftCount = findSingleInteger(giftedBy.innerText) || 1;
+				  chatmessage = giftedBy.innerText.trim();
+				  hasDonation = giftCount + " " + getTranslation("gifted-memberships", "Gifted");
+				  donoValue = 5 * giftCount; // Assuming $5 per membership
+				  hasMembership = getTranslation("sponsorship", "SPONSORSHIP");
+				  eventType = "giftpurchase";
+				}
+			  } catch (e) {
+				console.error("Error processing gift purchase:", e);
+			  }
+			} else if (eventType === "giftredemption") {
+			  try {
+				var messageElement = ele.querySelector("#message");
+				if (messageElement) {
+				  chatmessage = messageElement.innerText.trim();
+				  eventType = "giftredemption";
+				  var gifterElement = messageElement.querySelector(".bold.italic");
+				  if (gifterElement) {
+					subtitle = getTranslation("gifted-by", "Gifted by") + " " + gifterElement.innerText;
+				  }
+				  hasMembership = getTranslation("membership", "MEMBERSHIP");
+				}
+			  } catch (e) {
+				console.error("Error processing gift redemption:", e);
+			  }
 			} else {
-				hasMembership = getTranslation("new-member", "NEW MEMBER");
-				eventType = "newmember";
-				
-				if (chatmembership){
-					chatmessage =  chatmembership;
-				} else {
-					chatmessage = getTranslation("new-membership", "Joined as a member");
+				// Consolidated handler for new members, renewals, and upgrades.
+				try {
+					const headerSubtext = ele.querySelector("#header-subtext");
+					const headerText = ele.querySelector("#header-primary-text");
+
+					if (headerSubtext) {
+						const subtextContent = getAllContentNodes(headerSubtext);
+
+						if (subtextContent.toLowerCase().includes("upgraded")) {
+							chatmessage = subtextContent;
+							hasMembership = getTranslation("member-chat", "MEMBERSHIP");
+							eventType = "upgraded-membership";
+							const tierMatch = subtextContent.match(/to\s+(.+?)(?:\s*!)?$/i);
+							if (tierMatch && tierMatch[1]) {
+								subtitle = tierMatch[1].trim();
+							}
+						} else if (subtextContent.toLowerCase().includes("welcome to")) {
+							chatmessage = subtextContent;
+							hasMembership = getTranslation("member-chat", "MEMBERSHIP");
+							eventType = "new-membership";
+							const tierMatch = subtextContent.match(/welcome to\s+(.+?)(?:\s*!)?$/i);
+							if (tierMatch && tierMatch[1]) {
+								subtitle = tierMatch[1].trim();
+							}
+						} else if (headerText) {
+							chatmessage = getAllContentNodes(headerText);
+							hasMembership = getTranslation("member-chat", "MEMBERSHIP");
+							const monthMatch = chatmessage.match(/(\d+)\s+month/);
+							if (monthMatch && monthMatch[1]) {
+								const months = parseInt(monthMatch[1]);
+								subtitle = months === 1 ? `${months} ${getTranslation("month", "month")}` : `${months} ${getTranslation("months", "months")}`;
+							}
+							if (subtextContent) {
+								subtitle = (subtitle ? subtitle + " - " : "") + subtextContent;
+							}
+						}
+					} else if (headerText) {
+						chatmessage = getAllContentNodes(headerText);
+						hasMembership = getTranslation("member-chat", "MEMBERSHIP");
+						const monthMatch = chatmessage.match(/(\d+)\s+month/);
+						if (monthMatch && monthMatch[1]) {
+							const months = parseInt(monthMatch[1]);
+							subtitle = months === 1 ? `${months} ${getTranslation("month", "month")}` : `${months} ${getTranslation("months", "months")}`;
+						}
+					}
+				} catch (e) {
+					console.error("Error processing membership item:", e);
 				}
 			}
 
@@ -665,6 +744,23 @@
 			eventType = "sponsorship";
 			chatmessage = getAllContentNodes(giftedmemembership);
 			hasMembership = getTranslation("sponsorship", "SPONSORSHIP");
+		} else if (chatmessage && eventType === "jeweldonation") {
+			try {
+				const jewelMatch = chatmessage.match(/sent\s+(.*?)\s+for\s+([0-9,]+)\s+Jewels/i);
+				if (jewelMatch) {
+				  const jewelType = jewelMatch[1];
+				  const jewelAmount = jewelMatch[2].replace(/,/g, '');
+				  
+				  hasDonation = jewelAmount + " Jewels";
+				  donoValue = parseInt(jewelAmount, 10) / 100; // Convert jewels to approximate dollar value
+				  
+				  if (!settings.textonlymode){
+					chatmessage += ' <svg xmlns="http://www.w3.org/2000/svg" style="fill: red;" viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M19.28 3.61c-.96-.81-2.51-.81-3.47 0-.68.58-1.47 2.66-1.81 3.64-.34-.98-1.13-3.06-1.81-3.64-.96-.81-2.51-.81-3.47 0-.96.81-.96 2.13 0 2.94.62.53 2.7 1.12 3.94 1.45H5v13h14V8h-3.66c1.24-.32 3.32-.92 3.94-1.45.96-.81.96-2.13 0-2.94zM6 9h8v6H6V9zm0 11v-4h8v4H6zm12 0h-3v-4h3v4zm0-11v6h-3V9h3zM9.43 5.89c-.58-.43-.58-1.13 0-1.57.29-.21.67-.32 1.05-.32s.76.11 1.04.32c.39.29 1.02 1.57 1.48 2.68-1.48-.35-3.18-.82-3.57-1.11zm9.14 0c-.39.29-2.09.76-3.57 1.11.46-1.11 1.09-2.39 1.48-2.68.29-.21.67-.32 1.04-.32.38 0 .76.11 1.04.32.58.44.58 1.14.01 1.57z"></path></svg>';
+				  }
+				}
+			} catch (e) {
+			  console.error("Error processing jewel donation:", e);
+			}
 		}
 		
 		
@@ -708,6 +804,9 @@
 			backgroundColor = ele.style.getPropertyValue("--yt-live-chat-sponsor-color");
 			textColor = "#111;";
 		}
+		
+		
+		
 
 		srcImg = document.querySelector("#input-panel");
 		if (srcImg) {
@@ -730,6 +829,7 @@
 					hasDonation = chatmessage.split(" donated ").pop().trim();
 				}
 			}
+			
 			if (!chatmessage){
 				return 10;
 			}
@@ -747,6 +847,14 @@
 		} else if (isObject(chatmessage)){
 			//console.error(chatmessage);
 			chatmessage = "";
+		}
+		
+		if (!chatname && chatmessage.startsWith("Subscribers-only mode.")){
+			return;
+		}
+		
+		if (!chatname && !chatimg && !eventType && !hasDonation && !donoValue && !hasMembership){
+			return;
 		}
 		
 		var data = {};
@@ -776,7 +884,7 @@
 			data.type = "youtubeshorts";
 		}
 		
-		// console.log(data);
+		//console.log(data);
 		
 		if (data.hasDonation){
 			data.title = getTranslation("donation", "DONATION");
@@ -828,6 +936,7 @@
 	
 	chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 		try {
+			if ("getSource" == request){sendResponse("youtube");	return;	}
 			if ("focusChat" == request) {
 				document.querySelector("div#input").focus();
 				simulateFocus(document.querySelector("div#input"));
@@ -957,62 +1066,80 @@
 			}
 		}
 	});
+	
+	function checkType(ele, callback) {
+		console.log(ele);
+	  if (ele && ele.classList && ele.classList.contains("yt-live-chat-banner-renderer")) {
+		return;
+	  } else if (ele.tagName == "yt-live-chat-text-message-renderer".toUpperCase()) {
+		callback(ele);
+	  } else if (ele.tagName == "yt-live-chat-paid-message-renderer".toUpperCase()) {
+		callback(ele);
+	  } else if (ele.tagName == "yt-live-chat-membership-item-renderer".toUpperCase()) {
+		if (ele.hasAttribute("show-only-header") && ele.hasAttribute("modern")) {
+		  callback(ele, "membershiprenewal");
+		} else {
+		  callback(ele);
+		}
+	  } else if (ele.tagName == "yt-live-chat-donation-announcement-renderer".toUpperCase()) {
+		callback(ele);
+	  } else if (ele.tagName == "yt-live-chat-paid-sticker-renderer".toUpperCase()) {
+		callback(ele);
+	  } else if (ele.tagName == "ytd-sponsorships-live-chat-gift-redemption-announcement-renderer".toUpperCase()) {
+		callback(ele, "giftredemption");
+	  } else if (ele.tagName == "ytd-sponsorships-live-chat-gift-purchase-announcement-renderer".toUpperCase()) {
+		callback(ele, "giftpurchase");
+	  } else if (ele.tagName == "yt-gift-message-view-model".toUpperCase()) {
+		callback(ele, "jeweldonation");
+	  } else if (ele.tagName.startsWith("ytd-sponsorship") || ele.tagName.startsWith("yt-live-chat")) {
+		callback(ele);
+	  } else if (ele.tagName && (ele.tagName.startsWith("YTD-SPONSORSHIP") || ele.tagName.startsWith("YT-LIVE-CHAT"))) {
+		callback(ele);
+	  } else if (ele.tagName == "ytd-sponsorships-live-chat-header-renderer".toUpperCase()) {
+		callback(ele, "sponsorship");
+	  }
+	}
 
 	function onElementInserted(target, callback) {
-		//console.log(target);
-		var onMutationsObserved = function (mutations) {
-			mutations.forEach(function (mutation) {
-				//console.log(mutation.addedNodes);
-				if (mutation.addedNodes.length) {
-					for (var i = 0, len = mutation.addedNodes.length; i < len; i++) {
-						try {
-							if (mutation.addedNodes[i] && mutation.addedNodes[i].classList && mutation.addedNodes[i].classList.contains("yt-live-chat-banner-renderer")) {
-								continue;
-							} else if (mutation.addedNodes[i].tagName == "yt-live-chat-text-message-renderer".toUpperCase()) {
-								callback(mutation.addedNodes[i]);
-							} else if (mutation.addedNodes[i].tagName == "yt-live-chat-paid-message-renderer".toUpperCase()) {
-								callback(mutation.addedNodes[i]);
-							} else if (mutation.addedNodes[i].tagName == "yt-live-chat-membership-item-renderer".toUpperCase()) {
-								callback(mutation.addedNodes[i]);
-							} else if (mutation.addedNodes[i].tagName == "yt-live-chat-donation-announcement-renderer".toUpperCase()) {
-								//console.log(mutation.addedNodes[i]);
-								callback(mutation.addedNodes[i])
-							} else if (mutation.addedNodes[i].tagName == "yt-live-chat-paid-sticker-renderer".toUpperCase()) {
-								callback(mutation.addedNodes[i]);
-							} else if (mutation.addedNodes[i].tagName == "ytd-sponsorships-live-chat-gift-redemption-announcement-renderer".toUpperCase()) {
-								callback(mutation.addedNodes[i], "giftredemption");
-							} else if (mutation.addedNodes[i].tagName == "ytd-sponsorships-live-chat-gift-purchase-announcement-renderer".toUpperCase()) {
-								// ytd-sponsorships-live-chat-gift-purchase-announcement-renderer
-								callback(mutation.addedNodes[i], "giftpurchase");
-							} else if (mutation.addedNodes[i].tagName.startsWith("ytd-sponsorship") || mutation.addedNodes[i].tagName.startsWith("yt-live-chat")){
-								callback(mutation.addedNodes[i]);
-							} else {
-								//console.error("unknown: "+mutation.addedNodes[i].tagName);
-							}
-						} catch (e) {}
-					}
-				}
-			});
-		};
-		if (!target) {
-			return;
-		}
-		var config = {childList: true, subtree: false};
-		var MutationObserver = window.MutationObserver || window.WebKitMutationObserver;
-		var observer = new MutationObserver(onMutationsObserved);
-		observer.observe(target, config);
+	  //console.log(target);
+	  var onMutationsObserved = function (mutations) {
+		mutations.forEach(function (mutation) {
+		  //console.log(mutation.addedNodes);
+		  if (mutation.addedNodes.length) {
+			for (var i = 0, len = mutation.addedNodes.length; i < len; i++) {
+			  try {
+				checkType(mutation.addedNodes[i], callback);
+			  } catch (e) {}
+			}
+		  }
+		});
+	  };
+	  if (!target) {
+		return;
+	  }
+	  var config = {childList: true, subtree: false};
+	  var MutationObserver = window.MutationObserver || window.WebKitMutationObserver;
+	  var observer = new MutationObserver(onMutationsObserved);
+	  observer.observe(target, config);
 	}
 
 	console.log("Social stream inserted");
 	var marked = false;
 	
 	const checkTimer = setInterval(function () {
-	  const ele = document.querySelector("yt-live-chat-app #items.yt-live-chat-item-list-renderer");
+	  let ele = document.querySelector("yt-live-chat-app #items.yt-live-chat-item-list-renderer");
+	  
+	  if (!ele && document.querySelector("iframe") && !(document.querySelector("iframe[src]") && document.querySelector("iframe[src]").src.includes("truffle.vip"))) {
+		ele = document.querySelector("iframe")?.contentWindow?.document?.body?.querySelector("#chat-messages #chat #contents > #item-scroller > #item-offset > #items.yt-live-chat-item-list-renderer");	
+	  }
 	  if (ele && !ele.skip) {
 		ele.skip = true;
 		setupDeletionObserver(ele);
 		try {
-			ele.querySelectorAll("yt-live-chat-text-message-renderer").forEach(ele4 => {
+			[...document.querySelector("#items.yt-live-chat-item-list-renderer").children].forEach(ele4 => {
+				if (debugmode){
+					checkType(ele4,processMessage);
+				}
 				ele4.skip = true;
 				cleared = true;
 				if (ele4.id) {
@@ -1020,9 +1147,11 @@
 				}
 			});
 		} catch (e) {}
-		onElementInserted(ele, function (ele2) {
-			setTimeout(() => processMessage(ele2, false), captureDelay);
+		
+		onElementInserted(ele, function (ele2, eventtype=false) {
+			setTimeout(() => processMessage(ele2, eventtype), captureDelay);
 		});
+		
 	  } else if (!ele && document.querySelector("iframe#hyperchat") && !document.querySelector("iframe#hyperchat").marked) {
 			try {
 				var ele22 = document.querySelector("iframe#hyperchat").contentWindow.document.body.querySelector(".content");
@@ -1034,7 +1163,7 @@
 									try {
 										processHyperChat(mutation.addedNodes[i]);
 									} catch (e) {
-										console.log(e);
+										//console.log(e);
 									}
 								}
 							}
@@ -1101,62 +1230,6 @@
 	  }
 	}, 1000);
 
-	if (window.location.href.includes("youtube.com/watch")) {
-		var checkTimer2 = setInterval(function () {
-			try {
-				if (document.querySelector("iframe[src]") && !document.querySelector("iframe[src]").src.includes("truffle.vip")) {
-					var ele = document.querySelector("iframe").contentWindow.document.body.querySelector("#chat-messages #chat #contents > #item-scroller > #item-offset > #items.yt-live-chat-item-list-renderer");
-				} else {
-					var ele = false;
-				}
-			} catch (e) {}
-			
-			if (ele) {
-				
-				clearInterval(checkTimer2);
-				var cleared = false;
-				try {
-					ele.querySelectorAll("yt-live-chat-text-message-renderer").forEach(ele4 => {
-						ele4.skip = true;
-						cleared = true;
-						if (ele4.id) {
-							messageHistory.add(ele4.id);
-						}
-					});
-				} catch (e) {}
-				
-				if (cleared) {
-					clearInterval(checkTimer2);
-					onElementInserted(ele, function (ele2, eventType=false) {
-						setTimeout(
-							function (ele2,eventType) {
-								processMessage(ele2, false, eventType);
-							},
-							captureDelay,
-							ele2,
-							eventType
-						);
-					});
-				} else {
-					setTimeout(function (ele) {
-						// style-scope yt-live-chat-item-list-renderer
-						onElementInserted(ele, function (ele2, eventType=false) {
-							setTimeout(
-								function (ele2,eventType) {
-									processMessage(ele2, false, eventType);
-								},
-								captureDelay,
-								ele2,
-								eventType
-							);
-						});
-					}, 1000, ele);
-				
-				}
-			}
-		}, 3000);
-	}
-	
 	
 	function processHyperChat(ele) {
 		try {
@@ -1178,10 +1251,45 @@
 	}
 	
 	
+	var viewerCheckInterval = null;
+	var isInFallbackMode = false;
+	
 	function checkViewers(){
 		if (videoId && isExtensionOn && (settings.showviewercount || settings.hypemode)){
 			fetch('https://api.socialstream.ninja/youtube/viewers?video='+videoId)
-			  .then(response => response.json())
+			  .then(response => {
+				// Check if response is not ok (including 400 errors)
+				if (!response.ok) {
+					return response.json().then(errorData => {
+						// Check if it's a quota error
+						if (errorData && errorData.error && errorData.error.includes("quota")) {
+							console.log("API quota exceeded, falling back to page scraping");
+							// Switch to fallback mode with slower interval
+							if (!isInFallbackMode) {
+								isInFallbackMode = true;
+								// Clear existing interval and set new one for 2 minutes
+								if (viewerCheckInterval) {
+									clearInterval(viewerCheckInterval);
+								}
+								viewerCheckInterval = setInterval(function(){checkViewers()}, 120000); // 2 minutes
+							}
+							// Fallback to scraping the YouTube page
+							return fetchViewerCountFromPage(videoId);
+						}
+						throw new Error('API request failed');
+					});
+				}
+				// API call successful, ensure we're in normal mode
+				if (isInFallbackMode) {
+					isInFallbackMode = false;
+					// Reset to normal 30-second interval
+					if (viewerCheckInterval) {
+						clearInterval(viewerCheckInterval);
+					}
+					viewerCheckInterval = setInterval(function(){checkViewers()}, 30000);
+				}
+				return response.json();
+			  })
 			  .then(data => {
 				try {
 					if (data && ("viewers" in data)){
@@ -1200,12 +1308,72 @@
 				} catch (e) {
 					//console.log(e);
 				}
+			  })
+			  .catch(error => {
+				console.log("Error checking viewers:", error);
+				// Switch to fallback mode on any error
+				if (!isInFallbackMode) {
+					isInFallbackMode = true;
+					// Clear existing interval and set new one for 2 minutes
+					if (viewerCheckInterval) {
+						clearInterval(viewerCheckInterval);
+					}
+					viewerCheckInterval = setInterval(function(){checkViewers()}, 120000); // 2 minutes
+				}
+				// Try fallback method on any error
+				fetchViewerCountFromPage(videoId);
 			  });
 		}
 	}
 	
+	function fetchViewerCountFromPage(videoId) {
+		return fetch('https://www.youtube.com/watch?v=' + videoId)
+			.then(response => response.text())
+			.then(html => {
+				try {
+					// Look for the pattern in the HTML - matches any number in originalViewCount
+					const viewerMatch = html.match(/"isLive"\s*:\s*true\s*,\s*"originalViewCount"\s*:\s*"(\d+)"/);
+					
+					if (viewerMatch && viewerMatch[1]) {
+						const viewerCount = parseInt(viewerMatch[1]);
+						
+						// Validate the viewer count is reasonable
+						if (!isNaN(viewerCount) && viewerCount >= 0 && viewerCount < 1000000000) {
+							console.log("Successfully scraped viewer count:", viewerCount);
+							
+							// Send the viewer count update
+							chrome.runtime.sendMessage(
+								chrome.runtime.id,
+								({message:{
+										type: (youtubeShorts ? "youtubeshorts" : "youtube"),
+										event: 'viewer_update',
+										meta: viewerCount
+									}
+								}),
+								function (e) {}
+							);
+							
+							return { viewers: viewerCount };
+						} else {
+							console.log("Invalid viewer count scraped:", viewerCount);
+						}
+					} else {
+						console.log("Could not find viewer count in page HTML");
+					}
+				} catch (e) {
+					console.error("Error parsing viewer count from page:", e);
+				}
+				
+				return null;
+			})
+			.catch(error => {
+				console.error("Error fetching YouTube page for viewer count:", error);
+				return null;
+			});
+	}
+	
 	setTimeout(function(){checkViewers();},2500);
-	setInterval(function(){checkViewers()},10000);
+	viewerCheckInterval = setInterval(function(){checkViewers()},30000);
 	
 
 	///////// the following is a loopback webrtc trick to get chrome to not throttle this tab when not visible.

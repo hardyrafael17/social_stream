@@ -1,7 +1,9 @@
 (function () {
 	
 	
-	async function fetchWithTimeout(URL, timeout=8000){ // ref: https://dmitripavlutin.com/timeout-fetch-request/
+	
+	var isExtensionOn = true;
+async function fetchWithTimeout(URL, timeout=8000){ // ref: https://dmitripavlutin.com/timeout-fetch-request/
 		try {
 			const controller = new AbortController();
 			const timeout_id = setTimeout(() => controller.abort(), timeout);
@@ -131,6 +133,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("rooter");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('#commentInput').focus();
 					sendResponse(true);

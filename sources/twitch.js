@@ -97,7 +97,7 @@
 	
 	const SELECTORS = {
 		displayName: ".chat-author__display-name, .chatter-name, .seventv-chat-user-username,  [data-test-selector='extension-message-name'], .seventv-chat-user-username",
-		messageBody: ".seventv-chat-message-body, .seventv-message-context, [data-test-selector='chat-line-message-body'], [data-a-target='chat-line-message-body'], [data-a-target='chat-message-text']",
+		messageBody: ".seventv-chat-message-body, .seventv-message-context, [data-test-selector='chat-line-message-body'], [data-a-target='chat-line-message-body'], .message,  [data-a-target='chat-message-text']",
 		chatBadges: "img.chat-badge[src], img.chat-badge[srcset], .seventv-chat-badge>img[src], .seventv-chat-badge>img[srcset], .ffz-badge, .user-pronoun, img.chat-badge[src]",
 		messageContainer: ".chat-line__message, .seventv-message, .paid-pinned-chat-message-content-wrapper, .room-message"
 	};
@@ -268,6 +268,10 @@
 					}
 				}
 				
+				if (emoteNode.alt) {
+					newImgAttributes += ` alt="${emoteNode.alt}" title="${emoteNode.alt}"`;
+				}
+				
 				pendingRegularEmote = `<img ${newImgAttributes}>`;
 			} else {
 				if (pendingSpace){
@@ -349,6 +353,7 @@
 		var chatbadges = [];
 		var subscriber = "";
 		var subtitle = "";
+		var eventtype = ""; 
 		try {
 			ele.querySelectorAll(SELECTORS.chatBadges).forEach(badge => {
 				if (badge.alt && badge.alt.includes("Subscriber")){
@@ -406,89 +411,107 @@
 				BTT[i].outerHTML = "";
 			}
 		} catch (e) {}
+		
 
-		try {
-			if (event){
-				var eleContent = ele.childNodes[0];
+		var contentimg = ele.querySelector("img[src].chat-line__message--emote-gigantified") || "";
+		
+		if (contentimg){
+			contentimg = contentimg.src;
+			
+			if (lastMessage === contentimg && lastUser === username && (!lastEle || !lastEle.isConnected)) {
+				lastMessage = "";
+				username = "";
+				return;
 			} else {
-				var eleContent = ele.querySelector(SELECTORS.messageBody);
+				lastMessage = contentimg;
+				lastUser = username;
+				lastEle = ele;
 			}
-
-			chatmessage = getAllContentNodes(eleContent);
-
-			if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
-				highlightColor = "rgba(225, 20, 20, 0.3)";
-			}
-		} catch (e) {}
-
-		if (!chatmessage && !event) {
-			try {
-				var eleContent = ele.querySelector("span.message");
-				chatmessage = getAllContentNodes(eleContent);
-				if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
-					highlightColor = "rgba(225, 20, 20, 0.3)";
-				}
-			} catch (e) {}
-		}
-
-		if (!chatmessage && !event) {
-			try {
-				var eleContent = ele.querySelector(".chat-line__message-container .chat-line__username-container").nextElementSibling.nextElementSibling;
-				chatmessage = getAllContentNodes(eleContent);
-				eleContent = eleContent.nextElementSibling;
-				var count = 0;
-				while (eleContent) {
-					count++;
-					chatmessage += getAllContentNodes(eleContent);
-					eleContent = eleContent.nextElementSibling;
-					if (count > 20) {
-						break;
-					}
-				}
-				if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
-					highlightColor = "rgba(225, 20, 20, 0.3)";
-				}
-			} catch (e) {}
-		}
-
-		if (!chatmessage && !event) {
-			try {
-				var eleContent = ele.querySelector(".paid-pinned-chat-message-content-container").childNodes;
-
-				if (eleContent.length > 1) {
-					chatmessage = getAllContentNodes(eleContent[0]);
-					donations = escapeHtml(eleContent[1].textContent);
-				} else {
-					donations = escapeHtml(eleContent[0].textContent);
-				}
-			} catch (e) {}
-		}
-
-		if (chatmessage) {
-			chatmessage = chatmessage.trim();
-		}
-		if (lastMessage === chatmessage && lastUser === username && (!lastEle || !lastEle.isConnected)) {
-			lastMessage = "";
-			username = "";
-			return;
+			
 		} else {
-			lastMessage = chatmessage;
-			lastUser = username;
-			lastEle = ele;
-		}
+			try {
+				if (event){
+					var eleContent = ele.childNodes[0];
+				} else {
+					var eleContent = ele.querySelector(SELECTORS.messageBody);
+				}
 
-		if (chatmessage && chatmessage.includes(" (Deleted by ")) {
-			return; // I'm assuming this is a deleted message
-		}
+				chatmessage = getAllContentNodes(eleContent);
 
-		if (chatmessage && chatmessage.includes(" Timeout by ")) {
-			return; // I'm assuming this is a timed out message
-		}
+				if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
+					highlightColor = "rgba(225, 20, 20, 0.3)";
+				}
+			} catch (e) {}
 
-		if (chatmessage && chatmessage.includes(" (Banned by ")) {
-			return; // I'm assuming this is a banning message
-		}
+			if (!chatmessage && !event) {
+				try {
+					var eleContent = ele.querySelector("span.message");
+					chatmessage = getAllContentNodes(eleContent);
+					if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
+						highlightColor = "rgba(225, 20, 20, 0.3)";
+					}
+				} catch (e) {}
+			}
 
+			if (!chatmessage && !event) {
+				try {
+					var eleContent = ele.querySelector(".chat-line__message-container .chat-line__username-container").nextElementSibling.nextElementSibling;
+					chatmessage = getAllContentNodes(eleContent);
+					eleContent = eleContent.nextElementSibling;
+					var count = 0;
+					while (eleContent) {
+						count++;
+						chatmessage += getAllContentNodes(eleContent);
+						eleContent = eleContent.nextElementSibling;
+						if (count > 20) {
+							break;
+						}
+					}
+					if (!highlightColor && chatmessage && eleContent.querySelector(".chat-message-mention, .mention-fragment--recipient[data-a-target='chat-message-mention']")) {
+						highlightColor = "rgba(225, 20, 20, 0.3)";
+					}
+				} catch (e) {}
+			}
+
+			if (!chatmessage && !event) {
+				try {
+					var eleContent = ele.querySelector(".paid-pinned-chat-message-content-container").childNodes;
+
+					if (eleContent.length > 1) {
+						chatmessage = getAllContentNodes(eleContent[0]);
+						donations = escapeHtml(eleContent[1].textContent);
+					} else {
+						donations = escapeHtml(eleContent[0].textContent);
+					}
+				} catch (e) {}
+			}
+
+			if (chatmessage) {
+				chatmessage = chatmessage.trim();
+			}
+			
+			if (lastMessage === chatmessage && lastUser === username && (!lastEle || !lastEle.isConnected)) {
+				lastMessage = "";
+				username = "";
+				return;
+			} else {
+				lastMessage = chatmessage;
+				lastUser = username;
+				lastEle = ele;
+			}
+			if (chatmessage && chatmessage.includes(" (Deleted by ")) {
+				return; // I'm assuming this is a deleted message
+			}
+
+			if (chatmessage && chatmessage.includes(" Timeout by ")) {
+				return; // I'm assuming this is a timed out message
+			}
+
+			if (chatmessage && chatmessage.includes(" (Banned by ")) {
+				return; // I'm assuming this is a banning message
+			}
+		}
+		
 		if (channelName && settings.customtwitchstate) {
 			if (settings.customtwitchaccount && settings.customtwitchaccount.textsetting && settings.customtwitchaccount.textsetting.toLowerCase() !== channelName.toLowerCase()) {
 				return;
@@ -521,35 +544,14 @@
 			} catch (e) {}
 		}
 		
-		// if (!donations && displayName && (displayName==="Stream Stickers") && chatmessage && chatmessage.includes("Bits")) {
-			// donations = chatmessage.split(" Bits").pop()
-			// donations = donations.split(" ").pop();
-			// if (donations == parseInt(donations)){
-				// if (donations == "1"){
-					// donations = donations + " Bit";
-				//} else if (donations == "0"){
-				//	donations = false;
-				// } else {
-					// donations = donations + " Bits";
-				// }
-			// }
-		// }
 
 		var hasDonation = "";
 		if (donations) {
 			hasDonation = donations;
 		}
 
-		/* var eventtype = ele.querySelector("[data-highlight-label]");
-		if (eventtype){
-			try {
-				eventtype = escapeHtml(eventtype.dataset.highlightLabel) || "";
-			} catch(e){
-				eventtype = "";
-			}
-		} */
-		var eventtype = "";
-		if (!chatmessage) {
+		
+		if (!chatmessage && !contentimg) {
 			try {
 				chatmessage = getAllContentNodes(ele.querySelector(".seventv-reward-message-container")).trim();
 				eventtype = "reward";
@@ -558,28 +560,45 @@
 
 		if (eventtype && chatmessage) {
 			// pass
-		} else if (!chatmessage && !hasDonation && !username) {
+		} else if (!chatmessage && !hasDonation && !username && !contentimg) {
 			return;
 		}
+		
+		var originalMessage = "";
+	    var ReplyMessage = "";
+		var replyMessage = "";
 
 		try {
 			if (settings.replyingto && chatmessage) {
 				try {
-					var replyMessage = getAllContentNodes(ele.querySelector(".chat-line__message-container [title], .seventv-reply-message-part"));
-					replyMessage = replyMessage.trim();
-					if (!replyMessage) {
+					var t = ele.querySelector(".chat-line__message-container [title], .seventv-reply-message-part");
+					if (t){
+						replyMessage = getAllContentNodes(t);
+						replyMessage = replyMessage.trim();
+						
+					}
+					if (!replyMessage && ele.querySelector(".reply-line--mentioned")) {
 						replyMessage = getAllContentNodes(ele.querySelector(".reply-line--mentioned").parentNode);
 						replyMessage = replyMessage.trim();
 					}
+					if (!replyMessage) {
+						let l = ele.querySelector('path[d="M11 8h2v2h-2V8zM9 8H7v2h2V8z"]');
+						if (l){
+							replyMessage = getAllContentNodes(l.parentNode.parentNode.parentNode);
+							replyMessage = replyMessage.trim();
+						}
+					}
 				} catch (e) {
 					try {
-						var replyMessage = getAllContentNodes(ele.querySelector(".reply-line--mentioned").parentNode);
+						replyMessage = getAllContentNodes(ele.querySelector(".reply-line--mentioned").parentNode);
 						replyMessage = replyMessage.trim();
 					} catch (ee) {
 					}
 				}
 
 				if (replyMessage) {
+					ReplyMessage = replyMessage;
+					originalMessage = chatmessage;
 					if (settings.textonlymode) {
 						chatmessage = replyMessage + ": " + chatmessage;
 					} else {
@@ -626,7 +645,7 @@
 		} catch (e) {}
 		
 		
-		if (ele.querySelector(".message-event-pill")){
+		if (!contentimg && ele.querySelector(".message-event-pill")){
 			if (!settings.textonlymode){
 				chatmessage = "<i class='event-pill'>"+getAllContentNodes(ele.querySelector(".message-event-pill")) + "</i> " + chatmessage;
 			} else {
@@ -635,6 +654,15 @@
 		}
 
 		var data = {};
+		
+		if (ReplyMessage){
+			data.initial = ReplyMessage;
+		}
+	    if (originalMessage){
+			data.reply = originalMessage;
+		}
+		
+		data.contentimg = contentimg;
 		data.chatname = displayName;
 		data.username = username;
 		data.chatbadges = chatbadges;
@@ -686,6 +714,7 @@
 	if (chrome && chrome.runtime) {
 		chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 			try {
+				if ("getSource" == request){sendResponse("twitch");	return;	}
 				if ("focusChat" == request) {
 					if (!isExtensionOn || document.referrer.includes("twitch.tv/popout/")) {
 						return;
@@ -697,6 +726,7 @@
 					sendResponse(true);
 					return;
 				}
+				
 				if (typeof request === "object") {
 					if ("state" in request) {
 						isExtensionOn = request.state;
@@ -1165,7 +1195,7 @@
 	}
 	
 	setTimeout(function(){checkFollowers();},2500);
-	setInterval(function(){checkFollowers()},60000);
+	setInterval(function(){checkFollowers()},30000);
 
 	///////// the following is a loopback webrtc trick to get chrome to not throttle this tab when not visible.
 	try {

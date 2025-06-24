@@ -1,6 +1,8 @@
 (function () {
 	 
-	function toDataURL(url, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		  
@@ -44,7 +46,7 @@
 	}
 
 
-	function getAllContentNodes(element) { // takes an element.
+	function getAllContentNodes(element, textonly=settings.textonlymode) { // takes an element.
 		var resp = "";
 
 		if (!element) {
@@ -61,11 +63,11 @@
 
 		element.childNodes.forEach(node => {
 			if (node.childNodes.length) {
-				resp += getAllContentNodes(node)
+				resp += getAllContentNodes(node, textonly)
 			} else if ((node.nodeType === 3) && node.textContent && (node.textContent.trim().length > 0)) {
 				resp += escapeHtml(node.textContent) + "";
 			} else if (node.nodeType === 1) {
-				if (!settings.textonlymode) {
+				if (!textonly) {
 					if (node && node.classList && node.classList.contains("zero-width-emote")) {
 						resp += "<span class='zero-width-parent'>" + node.outerHTML + "</span>";
 					} else if (node && node.tagName && (node.tagName == "IMG") && node.src) {
@@ -95,7 +97,7 @@
 			return;;
 		}
 		
-		if (!settings.discord && !window.electronApi){
+		if (!settings.discord && !(window.ninjafy || window.electronApi)){
 			// discord isn't allowed via settings
 			return;
 		}
@@ -122,7 +124,7 @@
 		var bot = false;
 		var name="";
 		try {
-			name = getAllContentNodes(ele.querySelector("#message-username-"+mid+" [class^='username']")).trim();
+			name = getAllContentNodes(ele.querySelector("#message-username-"+mid+" [class^='username']"), true).trim();
 			
 			if (ele.querySelector("#message-username-"+mid+" [class^='botTag_']")){
 				bot = true;
@@ -163,7 +165,7 @@
 				}
 				try {
 					if (!name){
-						name = getAllContentNodes(ele.querySelector("[id^='message-username-']")).trim();
+						name = getAllContentNodes(ele.querySelector("[id^='message-username-'] [class^='username']"), true).trim();
 					}
 				} catch(e){
 				}
@@ -175,6 +177,10 @@
 				}
 				if (name){break;}
 			}
+		}
+		
+		if (name.includes(" @ ")){ // this is s relayed webhook that we can likely ignore.
+			return;
 		}
 		
 
@@ -314,6 +320,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("discord");	return;	}
 				if ("focusChat" == request){ // if (prev.querySelector('[id^="message-username-"]')){ //slateTextArea-
 				
 					if (textSettingsArray.length) {

@@ -1,6 +1,8 @@
 (function () {
 	 
-	function toDataURL(url, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		  
@@ -173,6 +175,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("vimm");	return;	}
 				if ("focusChat" == request){ // if (prev.querySelector('[id^="message-username-"]')){ //slateTextArea-
 					//document.querySelector('#chat-message-input').focus();
 					sendResponse(true);

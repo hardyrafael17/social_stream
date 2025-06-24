@@ -210,6 +210,10 @@
 					sendResponse(true);
 					return;
 				}
+				if ("getSource" == request){
+					sendResponse("soulbound");
+					return;
+				}
 				if (typeof request === "object"){
 					if ("state" in request) {
 						isExtensionOn = request.state;
@@ -259,7 +263,7 @@
 	setInterval(function(){
 		try {
 			// Find the chat container by looking for the main chat list container
-			var container = document.querySelector(".no-scrollbar > .custom-scrollbar");;
+			var container = [...document.querySelectorAll(".no-scrollbar > .custom-scrollbar")].pop()
 			
 			if (container && !container.marked){
 				container.marked = true;

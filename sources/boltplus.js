@@ -1,6 +1,8 @@
 (function () {
 	 
-	function toDataURL(url, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		var reader = new FileReader();
@@ -180,6 +182,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("boltplus");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('.public-DraftEditor-content[ contenteditable="true"]').focus();
 					

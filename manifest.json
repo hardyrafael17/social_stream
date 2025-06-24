@@ -2,7 +2,7 @@
   "name": "Social Stream Ninja",
   "description": "Powerful tooling to engage live chat on Youtube, Twitch, Zoom, and more.",
   "manifest_version": 3,
-  "version": "3.18.5",
+  "version": "3.22.7",
   "homepage_url": "http://socialstream.ninja/",
   "icons": {
     "128": "icons/icon-128.png"
@@ -24,15 +24,19 @@
 	"activeTab"
   ],
   "host_permissions": [
-	"http://localhost:8080/fav.html",
+	"http://localhost:8080/*",
     "http://localhost:11434/api/generate",
     "http://127.0.0.1:11434/api/generate",
+	"https://xeenon.xyz/*",
+	"https://whop.com/*",
     "https://zap.stream/*",
     "https://www.bigo.tv/*",
 	"https://soulbound.tv/*",
 	"https://claude.ai/*",
-	"https://arena.social/live/*",
+	"https://arena.social/*",
 	"https://www.moonbeam.stream/*",
+	"https://*.patreon.com/*",
+	"https://patreon.com/*",
 	"https://studio.favorited.com/popout/chat",
 	"https://*/*autoreloadwithsocialstream",
 	"https://*.webinargeek.com/webinar/*",
@@ -45,6 +49,8 @@
     "https://beamstream.gg/*/chat",
     "https://socialstream.ninja/sources/websocket/*",
     "https://socialstream.ninja/websocket/*",
+	"https://socialstream.ninja/beta/sources/websocket/*",
+    "https://socialstream.ninja/beta/websocket/*",
 	"https://beta.socialstream.ninja/sources/websocket/*",
     "https://beta.socialstream.ninja/websocket/*",
     "https://cozy.tv/*",
@@ -127,6 +133,7 @@
     "https://studio.youtube.com/*",
     "https://*.twitch.tv/*",
 	"https://www.bitchute.com/video/*",
+	"https://www.bitchute.com/popChat/*",
     "https://www.instagram.com/*",
     "https://livecenter.tiktok.com/*",
     "https://www.tiktok.com/*live*",
@@ -256,6 +263,10 @@
       "js": [ "./sources/openstreamingplatform.js" ],
       "matches": [ "https://demo.openstreamingplatform.com/view/*chatOnly=True*" ]
     },
+	{
+      "js": [ "./sources/xeenon.js" ],
+      "matches": [ "https://xeenon.xyz/*" ]
+    },
     {
       "js": [ "./sources/soulbound.js" ],
       "matches": [ "https://soulbound.tv/*" ]
@@ -275,6 +286,10 @@
 	{
       "js": [ "./sources/pilled.js" ],
       "matches": [ "https://pilled.net/*" ]
+    },
+	{
+      "js": [ "./sources/whop.js" ],
+      "matches": [ "https://whop.com/*" ]
     },
 	{
       "js": [ "./sources/uscreen.js" ],
@@ -341,6 +356,10 @@
     {
       "js": [ "./sources/circle.js" ],
       "matches": [ "https://community.insidethe.show/*", "https://community.talkinghealthtech.com/*", "https://members.firstinfam.com/*","https://*.circle.so/*" ]
+    },
+	{
+      "js": [ "./sources/patreon.js" ],
+      "matches": [ "https://*.patreon.com/*", "https://patreon.com/*"]
     },
     {
       "js": [ "./sources/sessions.js" ],
@@ -437,7 +456,7 @@
     },
 	{
       "js": [ "./sources/x.js" ],
-      "matches": [ "https://www.twitter.com/*", "https://twitter.com/*", "https://x.com/*/chat", "https://www.x.com/*/chat",  "https://x.com/i/broadcasts/*?chat"]
+      "matches": [ "https://www.twitter.com/*", "https://twitter.com/*", "https://x.com/*/chat", "https://www.x.com/*/chat",  "https://x.com/i/broadcasts/*"]
     },
     {
       "js": [ "./sources/static/threads.js" ],
@@ -473,9 +492,19 @@
 	{
       "js": [ "./sources/youtube.js" ],
       "matches": [
-        "https://www.youtube.com/watch*&socialstream",
+        "https://www.youtube.com/watch?v=*&socialstream",
         "https://youtube.com/live_chat*",
         "https://www.youtube.com/live_chat*"
+      ]
+    },
+	{
+      "js": [ "./sources/websocket/youtube.js" ],
+      "matches": [
+        "https://socialstream.ninja/sources/websocket/youtube*",
+		"https://beta.socialstream.ninja/sources/websocket/youtube*",
+		"https://socialstream.ninja/beta/sources/websocket/youtube*",
+        "file:///C:/Users/steve/Code/social_stream/sources/websocket/youtube.html*",
+		"http://localhost:8080/youtube.html*"
       ]
     },
     {
@@ -529,15 +558,21 @@
     },
     {
       "js": [ "./sources/kick.js" ],
-      "matches": [ "https://kick.com/*/chatroom"]
-    },
-	{
-      "js": [ "./sources/kick_new.js" ],
-      "matches": [ "https://kick.com/popout/*/chat"]
+      "matches": [ "https://kick.com/*/chatroom", "https://kick.com/popout/*/chat"]
     },
     {
       "js": [ "./sources/cloudhub.js" ],
       "matches": [ "https://app.clouthub.com/*" ]
+    },
+	{
+      "js": [ "./sources/websocket/bilibili.js" ],
+      "matches": [
+        "https://socialstream.ninja/sources/websocket/bilibili*",
+		"https://socialstream.ninja/beta/sources/websocket/bilibili*",
+		"https://beta.socialstream.ninja/sources/websocket/bilibili*",
+        "file:///C:/Users/steve/Code/social_stream/sources/websocket/bilibili.html*",
+		"http://localhost:8080/bilibili.html*"
+      ]
     },
     {
       "js": [ "./sources/bilibili.js" ],
@@ -554,7 +589,7 @@
     },
 	{
       "js": [ "./sources/bitchute.js" ],
-      "matches": [ "https://www.bitchute.com/video/*" ]
+      "matches": [ "https://www.bitchute.com/video/*", "https://www.bitchute.com/popChat/*" ]
     },
     {
       "js": [ "./sources/piczel.js" ],
@@ -569,17 +604,29 @@
       "matches": [
         "https://socialstream.ninja/sources/websocket/twitch*",
 		"https://beta.socialstream.ninja/sources/websocket/twitch*",
+		"https://socialstream.ninja/beta/sources/websocket/twitch*",
         "file:///C:/Users/steve/Code/social_stream/sources/websocket/twitch.html*",
-		"http://localhost/twitch.html*"
+		"http://localhost:8080/twitch.html*"
       ]
     },
 	{
       "js": [ "./sources/websocket/irc.js" ],
       "matches": [
         "https://socialstream.ninja/sources/websocket/irc*",
+		"https://socialstream.ninja/beta/sources/websocket/irc*",
 		"https://beta.socialstream.ninja/sources/websocket/irc*",
         "file:///C:/Users/steve/Code/social_stream/sources/websocket/irc.html*",
-		"http://localhost/irc.html*"
+		"http://localhost:8080/irc.html*"
+      ]
+    },
+	{
+      "js": [ "./sources/websocket/stageten.js" ],
+      "matches": [
+        "https://socialstream.ninja/sources/websocket/stageten*",
+		"https://socialstream.ninja/beta/sources/websocket/stageten*",
+		"https://beta.socialstream.ninja/sources/websocket/stageten*",
+        "file:///C:/Users/steve/Code/social_stream/sources/websocket/stageten.html*",
+		"http://localhost:8080/stageten.html*"
       ]
     },
     {
@@ -693,7 +740,7 @@
     },
 	{
       "js": [ "./sources/arenasocial.js" ],
-      "matches": [ "https://arena.social/live/*" ]
+      "matches": [ "https://arena.social/*" ]
     },
     {
       "js": [ "./sources/teams.js" ],

@@ -1,5 +1,7 @@
 (function () {
-  function pushMessage(data) {
+  
+	var isExtensionOn = true;
+function pushMessage(data) {
     try {
       chrome.runtime.sendMessage(
         chrome.runtime.id,
@@ -201,6 +203,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("slack");	return;	}
 				if ("focusChat" == request){
 					if (!document.querySelector('[contenteditable][role="textbox"]>p')){
 						sendResponse(false);

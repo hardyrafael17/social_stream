@@ -1,5 +1,7 @@
 (function () {
-	function toDataURL(blobUrl, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(blobUrl, callback) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
 
@@ -144,8 +146,9 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("noice");	return;	}
 				if ("focusChat" == request){ // doesn't support/have chat
-					document.querySelector('[role="textbox"], [contenteditable="true"]').focus();
+					document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], [contenteditable="true"]').focus();
 					sendResponse(true);
 					return;
 				}

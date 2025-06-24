@@ -2,7 +2,9 @@
 (function () {
 	
 	
-	function checkConditions(element) {
+	
+	var isExtensionOn = true;
+function checkConditions(element) {
 	  // Get all siblings of the element
 	  const siblings = Array.from(element.parentNode.children);
 	  const index = siblings.indexOf(element);
@@ -559,7 +561,7 @@
 		console.log("LOADED SocialStream EXTENSION");
 		
 		try {
-			if (window.location.pathname.includes("/live/")  || (window.location.pathname==="/")){
+			if (window.location.pathname.includes("/live/") || window.location.pathname.includes("%2Flive%2F") || (window.location.pathname==="/")){
 				var main =  document.querySelectorAll("div>div>section>div");
 				
 				for (var j =0;j<main.length;j++){
@@ -580,7 +582,7 @@
 			}
 		
 			try {
-				if (window.location.pathname.includes("/live") || (window.location.pathname.endsWith("/") || document.querySelector("video") || document.querySelector("textarea")) || (window.location.pathname==="/")){
+				if (window.location.pathname.includes("/live") || window.location.pathname.includes("%2Flive") || (window.location.pathname.endsWith("/") || document.querySelector("video") || document.querySelector("textarea")) || (window.location.pathname==="/")){
 					try {
 						var main = document.querySelectorAll("div>div>section>div");
 						for (var j =0;j<main.length;j++){
@@ -595,7 +597,7 @@
 				}
 			} catch(e){}
 			
-			if (!window.location.pathname.includes("/live")){ // not live video
+			if (!(window.location.pathname.includes("/live") || window.location.pathname.includes("%2Flive"))){ // not live video
 				try {
 					var main = document.querySelectorAll("article");
 					if (main){
@@ -672,16 +674,37 @@
 	});
 	
 	var videosMuted = false;
+	
+	
+	function simulateFocus(element) {
+		// Create and dispatch focusin event
+		const focusInEvent = new FocusEvent('focusin', {
+			view: window,
+			bubbles: true,
+			cancelable: true
+		});
+		element.dispatchEvent(focusInEvent);
+
+		// Create and dispatch focus event
+		const focusEvent = new FocusEvent('focus', {
+			view: window,
+			bubbles: false,
+			cancelable: true
+		});
+		element.dispatchEvent(focusEvent);
+	}
 
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("instagram");	return;	}
 				if ("focusChat" == request){
 					if (!document.querySelector("textarea[class]")){
 						sendResponse(false);
 						return;
 					}
 					document.querySelector("textarea[class]").focus();
+					simulateFocus(document.querySelector('textarea[class]'));
 					sendResponse(true);
 					return;
 				}

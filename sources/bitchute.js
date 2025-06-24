@@ -152,8 +152,11 @@
 		var msg="";
 		try {
 			msg = getAllContentNodes(ele.querySelector(".q-item__label .text-caption.text-weight-regular")).trim();
+			
 		} catch(e){
-			return;
+		}
+		if (!msg){
+			msg = getAllContentNodes(ele.querySelector(".text-body2.text-weight-light")).trim();
 		}
 		
 		var chatbadges = [];
@@ -210,9 +213,9 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("bitchute");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('textarea[tabindex="0"], textarea').focus();
-					
 					sendResponse(true);
 					return;
 				}
@@ -244,7 +247,7 @@
 						try {
 							if (mutation.addedNodes[i].skip){continue;}
 							mutation.addedNodes[i].skip = true;
-							processMessage(mutation.addedNodes[i]);
+							//processMessage(mutation.addedNodes[i]);
 						} catch(e){}
 					}
 				}
@@ -261,30 +264,37 @@
 	IframeManager.init();
 	
 	setInterval(function(){
+		let target = '.q-list[role="list"]';
+		if (window.location.pathname.includes("popChat")){
+			target = '.q-list[role="list"]';
+		} else {
+			target = "#right_column .q-list"
+		}
 		try {
-		if (document.querySelector("#right_column .q-list")){
-			if (!document.querySelector("#right_column .q-list").marked){
-				document.querySelector("#right_column .q-list").marked=true;
-				
-				console.log("CONNECTED chat detected");
-
-				setTimeout(function(){
+			if (document.querySelector(target)){
+				if (!document.querySelector(target).marked){
+					document.querySelector(target).marked=true;
 					
-					[...document.querySelector("#right_column .q-list").childNodes].forEach(ele=>{
-						try {
-							if (ele.skip){return;}
-							ele.skip = true;
-							
-							//processMessage(ele);
-						} catch(e){}
-					});
-					onElementInserted(document.querySelector("#right_column .q-list"));
+					console.log("CONNECTED chat detected");
 
-				},2000);
+					setTimeout(function(target){
+						
+						[...document.querySelector(target).childNodes].forEach(ele=>{
+							try {
+								if (ele.skip){return;}
+								ele.skip = true;
+								
+								processMessage(ele);
+							} catch(e){}
+						});
+						onElementInserted(document.querySelector(target));
+
+					},2000,target);
 
 
+				}
 			}
-		}} catch(e){
+		} catch(e){
 			//console.error(e);
 		}
 	},2000);

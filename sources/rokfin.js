@@ -1,6 +1,8 @@
 (function () {
 	
-	function escapeHtml(unsafe){
+	
+	var isExtensionOn = true;
+function escapeHtml(unsafe){
 		try {
 			if (settings.textonlymode){ // we can escape things later, as needed instead I guess.
 				return unsafe;
@@ -139,6 +141,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("rokfin");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('#comment-form_comment').focus();
 					sendResponse(true);

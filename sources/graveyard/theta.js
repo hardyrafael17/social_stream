@@ -1,5 +1,7 @@
 (function () {
-	try {
+	
+	var isExtensionOn = true;
+try {
 	function toDataURL(blobUrl, callback) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
@@ -140,6 +142,7 @@
 		chrome.runtime.onMessage.addListener(
 			function (request, sender, sendResponse) {
 				try{
+					if ("getSource" == request){sendResponse("theta");	return;	}
 					if ("focusChat" == request){
 						try {
 							var ele = document.querySelector("textbox") || document.querySelector("input[type='text']");

@@ -1,5 +1,7 @@
 (function () {
-	function toDataURL(blobUrl, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(blobUrl, callback) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
 
@@ -132,6 +134,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("openstreamingplatform");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('#chatinput').focus();
 					sendResponse(true);

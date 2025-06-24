@@ -1,6 +1,8 @@
 (function () {
 	 
-	async function toDataURL(url) {
+	
+	var isExtensionOn = true;
+async function toDataURL(url) {
 	  return new Promise((resolve, reject) => {
 		const xhr = new XMLHttpRequest();
 		xhr.onload = function() {
@@ -153,6 +155,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try {
+				if ("getSource" == request){sendResponse("bilibilicom");	return;	}
 				if ("focusChat" == request){ // if (prev.querySelector('[id^="message-username-"]')){ //slateTextArea-
 					document.querySelector('textarea.comment-sender_input').focus();
 					sendResponse(true);

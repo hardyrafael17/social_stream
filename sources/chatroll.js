@@ -1,5 +1,7 @@
 (function () {
-	function toDataURL(blobUrl, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(blobUrl, callback) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
 
@@ -145,6 +147,7 @@
 		chrome.runtime.onMessage.addListener(
 			function (request, sender, sendResponse) {
 				try{
+					if ("getSource" == request){sendResponse("chatroll");	return;	}
 					if ("focusChat" == request){
 						try {
 							var ele = document.body.querySelector(".chat-input");

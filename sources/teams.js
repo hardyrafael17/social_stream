@@ -1,5 +1,7 @@
 (function () {
-	function toDataURL(blobUrl, callback, maxSizeKB = 10) {
+	
+	var isExtensionOn = true;
+function toDataURL(blobUrl, callback, maxSizeKB = 10) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
 
@@ -282,6 +284,7 @@
 		chrome.runtime.onMessage.addListener(
 			function (request, sender, sendResponse) {
 				try{
+					if ("getSource" == request){sendResponse("teams");	return;	}
 					if ("focusChat" == request){
 						try {
 							var ele = document.querySelector('iframe').contentWindow.document.body.querySelector(".cke_textarea_inline[contenteditable='true'], div [role='textbox']>p[data-placeholder]");

@@ -1,5 +1,7 @@
 (function () {
-	function toDataURL(blobUrl, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(blobUrl, callback) {
 		var xhr = new XMLHttpRequest;
 		xhr.responseType = 'blob';
 
@@ -99,6 +101,15 @@
 			return;
 		}
 		
+		var chatimg = "";
+		try {
+			chatimg = ele.querySelector('img[src]').src;
+			if (chatimg == "https://live.fc2.com/common/live/img/thumb_profile_small.png"){
+				chatimg = "";
+			}
+		} catch(e){
+		}
+		
 		//data.sourceImg = brandedImageURL;
 		
 		var sourceImg = "fc2.png";
@@ -109,7 +120,7 @@
 		data.textColor = "";
 		data.nameColor = nameColor;
 		data.chatmessage = msg;
-		data.chatimg = "";
+		data.chatimg = chatimg;
 		data.hasDonation = "";
 		data.membership = "";
 		data.contentimg = "";
@@ -133,6 +144,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("fc2");	return;	}
 				if ("focusChat" == request){ // doesn't support/have chat
 					sendResponse(false);
 					return;

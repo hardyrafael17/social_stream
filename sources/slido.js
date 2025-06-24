@@ -1,6 +1,8 @@
 (function () {
 	
-	function getAllContentNodes(element) {
+	
+	var isExtensionOn = true;
+function getAllContentNodes(element) {
 		var resp = "";
 		element.childNodes.forEach(node=>{
 			if (node.childNodes.length){
@@ -166,6 +168,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("slido");	return;	}
 				if ("focusChat" == request){
 					document.querySelector('textarea').focus();
 					sendResponse(true);

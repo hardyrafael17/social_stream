@@ -1,6 +1,8 @@
 (function () {
 	
-	function toDataURL(url, callback) {
+	
+	var isExtensionOn = true;
+function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		  
@@ -160,6 +162,7 @@
 	chrome.runtime.onMessage.addListener(
 		function (request, sender, sendResponse) {
 			try{
+				if ("getSource" == request){sendResponse("crowdcast");	return;	}
 				if ("focusChat" == request){
 					document.querySelector("textarea#input-chat").focus();
 					sendResponse(true);
