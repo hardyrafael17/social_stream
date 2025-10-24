@@ -179,7 +179,7 @@ div > span {
   display:none!important;
 }
 [data-viewers]::before {
-  content: "views: "; // YouTube's API requires "views" instead of "👁️" .. 🤷
+  content: "views: "; /* YouTube's API requires "views" instead of "👁️" */
 }
 
 [data-chatters] {
@@ -247,6 +247,32 @@ span.zero-width-parent img.zero-width-emote {
 }
 .short .sourceStatHolder {
 	height: 74px;
+}
+.align-left {
+  display: block;
+  margin-left: 0;
+  margin-right: auto;
+  text-align: left;
+}
+.align-right {
+  display: block;
+  margin-left: auto;
+  margin-right: 0;
+  text-align: right;
+}
+.align-center {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+.align-center .sourceStatHolder {
+  justify-content: center;
+}
+.align-center [data-viewers],
+.align-center [data-chatters] {
+  text-align: center !important;
+  justify-content: center;
 }
 .sourceStatHolder img {
   width: calc(var(--width) );
@@ -518,6 +544,9 @@ var customNodeLimit = false;
 var body = document.body;
 var html = document.documentElement;
 var mainOutputWindow = document.getElementById("output");
+var parentHolder = document.getElementById("parentHolder");
+var hypeContainer = document.getElementById("hype");
+var hypeTitle = document.getElementById("hypetitle");
 var showdupes = true;
 var hidereplies = false;
 var uniqueId = "";
@@ -584,9 +613,14 @@ function loadGoogleFont(fontName) {
     var currentFont = getComputedStyle(document.documentElement).getPropertyValue('--font-family').trim();
     document.documentElement.style.setProperty("--font-family", "'" + fontName.replaceAll("+", " ") + "', " + currentFont);
 }
-if (urlParams.get("font")) {
-    document.documentElement.style.setProperty("--font-family", urlParams.get("font") + ", Sora, Roboto, Avenir Next, Helvetica, Geneva, Verdana, Arial, sans-serif");
+			
+if (urlParams.get('font')) {
+	const raw = urlParams.get('font').trim();
+	const clean = raw.replace(/^['"]|['"]$/g, '');
+	const escaped = clean.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	document.documentElement.style.setProperty('--font-family', `"${escaped}", Sora, Roboto, Helvetica, Geneva, Verdana, Arial, sans-serif`);
 }
+
 if (urlParams.get("googlefont")) {
     loadGoogleFont(urlParams.get("googlefont"));
 }
@@ -615,12 +649,21 @@ if (urlParams.has("fontsize")) {
     const scaleValue = parseFloat(urlParams.get("fontsize")) || 1.0;
     document.documentElement.style.setProperty("--scale", scaleValue);
 }
-if (urlParams.has("alignright")) {
-    document.getElementById("parentHolder").style.position = "absolute";
-    document.getElementById("parentHolder").style.right = "0";
+var alignment = null;
+var alignRightLegacy = urlParams.has("alignright");
+if (urlParams.has("align")) {
+    var requestedAlignment = (urlParams.get("align") || "").toLowerCase();
+    if (requestedAlignment === "left" || requestedAlignment === "center" || requestedAlignment === "right") {
+        alignment = requestedAlignment;
+    }
+}
+if (alignment === null && alignRightLegacy) {
+    alignment = "right";
 }
 if (urlParams.has("hidetitle")) {
-    document.getElementById("hypetitle").classList.add("hidden");
+    if (hypeTitle) {
+        hypeTitle.classList.add("hidden");
+    }
 }
 if (urlParams.has("opacity")) {
     getById("output").style.opacity = urlParams.get("opacity") || 0.3
@@ -628,6 +671,23 @@ if (urlParams.has("opacity")) {
 var conCon = 1;
 var socketserver = false;
 var serverURL = urlParams.has("localserver") ? "ws://127.0.0.1:3000" : "wss://io.socialstream.ninja";
+
+// Allow custom channel pair via URL params
+// Defaults for Hype overlay are out:3, in:4
+var outChannel = 3;
+var inChannel = 4;
+try {
+    if (urlParams.has("out")) {
+        outChannel = parseInt(urlParams.get("out")) || outChannel;
+    } else if (urlParams.has("outchan")) {
+        outChannel = parseInt(urlParams.get("outchan")) || outChannel;
+    }
+    if (urlParams.has("in")) {
+        inChannel = parseInt(urlParams.get("in")) || inChannel;
+    } else if (urlParams.has("inchan")) {
+        inChannel = parseInt(urlParams.get("inchan")) || inChannel;
+    }
+} catch(e) {}
 
 function setupSocket() {
     socketserver.onclose = function() {
@@ -639,10 +699,11 @@ function setupSocket() {
     };
     socketserver.onopen = function() {
         conCon = 1;
+        // Join with the configured channel pair
         socketserver.send(JSON.stringify({
             "join": roomID,
-            "out": 3,
-            "in": 4
+            "out": outChannel,
+            "in": inChannel
         }));
     };
     socketserver.addEventListener('message', function(event) {
@@ -708,12 +769,16 @@ var showChatters = true;
 if (urlParams.has("viewersonly")) {
     showViewers = true;
     showChatters = false;
-    document.getElementById("hype").classList.add("short");
+    if (hypeContainer) {
+        hypeContainer.classList.add("short");
+    }
 }
 if (urlParams.has("chattersonly")) {
     showViewers = false;
     showChatters = true;
-    document.getElementById("hype").classList.add("short");
+    if (hypeContainer) {
+        hypeContainer.classList.add("short");
+    }
 }
 var titleText = "";
 if (showViewers && showChatters) {
@@ -723,7 +788,9 @@ if (showViewers && showChatters) {
 } else {
     titleText = "Active chatters in the last 5-minutes";
 }
-document.getElementById("hypetitle").textContent = titleText;
+if (hypeTitle) {
+    hypeTitle.textContent = titleText;
+}
 let style = "default";
 if (urlParams.has("style")) {
     style = urlParams.get("style");
@@ -742,7 +809,9 @@ if (urlParams.has("combineall")) {
 }
 
 // Apply the style to the parent holder
-document.getElementById("parentHolder").classList.add("style-" + style);
+if (parentHolder) {
+    parentHolder.classList.add("style-" + style);
+}
 
 let scale = 1;
 if (urlParams.has("scale")) {
@@ -762,15 +831,65 @@ if (urlParams.has("style")) {
         case "minimal":
             document.documentElement.style.setProperty("--padding", "6px");
             document.documentElement.style.setProperty("--width", "20px");
-            document.getElementById("hypetitle").classList.add("hidden");
+            if (hypeTitle) {
+                hypeTitle.classList.add("hidden");
+            }
             scale = scale * 3;
             break;
         case "topbar":
-            document.getElementById("parentHolder").style.position = "fixed";
-            document.getElementById("parentHolder").style.right = "0";
-            document.getElementById("parentHolder").style.top = "0";
-            document.getElementById("hypetitle").classList.add("hidden");
+            if (parentHolder) {
+                parentHolder.style.position = "fixed";
+                parentHolder.style.top = "0";
+                parentHolder.style.left = "";
+                parentHolder.style.right = "";
+                parentHolder.style.transform = "";
+                var topbarAlignment = alignment || "right";
+                if (topbarAlignment === "center") {
+                    parentHolder.style.left = "50%";
+                    parentHolder.style.transform = "translateX(-50%)";
+                    if (hypeContainer) {
+                        hypeContainer.style.justifyContent = "center";
+                    }
+                } else if (topbarAlignment === "left") {
+                    parentHolder.style.left = "0";
+                } else {
+                    parentHolder.style.right = "0";
+                }
+            }
+            if (hypeTitle) {
+                hypeTitle.classList.add("hidden");
+            }
             break;
+    }
+}
+
+if (alignment && parentHolder) {
+    if (style !== "topbar") {
+        parentHolder.classList.add("align-" + alignment);
+        if (alignment === "left") {
+            parentHolder.style.marginLeft = "0";
+            parentHolder.style.marginRight = "auto";
+            parentHolder.style.textAlign = "left";
+        } else if (alignment === "right") {
+            parentHolder.style.marginLeft = "auto";
+            parentHolder.style.marginRight = "0";
+            parentHolder.style.textAlign = "right";
+        } else {
+            parentHolder.style.marginLeft = "auto";
+            parentHolder.style.marginRight = "auto";
+            parentHolder.style.textAlign = "center";
+			parentHolder.style.width = "100%";
+        }
+        if (alignRightLegacy) {
+            parentHolder.style.position = "absolute";
+            parentHolder.style.right = "0";
+            parentHolder.style.left = "";
+        }
+        if (alignment === "center" && hypeContainer) {
+            hypeContainer.style.justifyContent = "center";
+        }
+    } else if (alignment === "left" || alignment === "right") {
+        parentHolder.classList.add("align-" + alignment);
     }
 }
 document.body.style.transform = `scale(${scale})`;
@@ -788,6 +907,7 @@ function getSourceImage(type) {
 var lastUpdated = {};
 var hasViewerCount = {};
 var activeChatters = {};
+var aggregatedViewers = {};
 
 function handleClearAction(clearAction) {
     if (!clearAction || !clearAction.action) return;
@@ -795,7 +915,11 @@ function handleClearAction(clearAction) {
         activeChatters = {};
         hasViewerCount = {};
         lastUpdated = {};
-        document.getElementById("parentHolder").classList.add("hidden");
+        const hypeEl = document.getElementById("hype");
+        if (hypeEl) hypeEl.innerHTML = "";
+        if (parentHolder) {
+            parentHolder.classList.add("hidden");
+        }
         console.log("Hype.html: Cleared local state due to refreshSources action.");
     }
 }
@@ -817,7 +941,7 @@ function processInput(data) {
         console.error("hype.html: 'hype' container element not found!");
         return;
     }
-    hypeContainer.innerHTML = "";
+    // Do not clear and rebuild on each update — avoid flicker
     const parentHolder = document.getElementById("parentHolder");
     if (!parentHolder) {
         console.error("hype.html: 'parentHolder' element not found!");
@@ -879,10 +1003,32 @@ function processInput(data) {
         combinedData = newCombinedData;
     }
     
+    // Normalize keys by collapsing variants like "kick-123" → "kick"
+    // Sum viewer counts for the same base type and keep the max of chatters to avoid double counting
+    if (combinedData && typeof combinedData === 'object') {
+        const normalizedCombined = {};
+        for (const key of Object.keys(combinedData)) {
+            const entry = combinedData[key];
+            if (!entry || typeof entry !== 'object') continue;
+            const base = getSourceImage(key);
+            if (!normalizedCombined[base]) {
+                normalizedCombined[base] = { chatters: 0, viewers: 0 };
+            }
+            const v = parseInt(entry.viewers);
+            const c = parseInt(entry.chatters);
+            if (!isNaN(v)) normalizedCombined[base].viewers += v;
+            if (!isNaN(c)) normalizedCombined[base].chatters = Math.max(normalizedCombined[base].chatters, c);
+        }
+        combinedData = normalizedCombined;
+    }
+    
     const sourceKeys = Object.keys(combinedData);
 	sourceKeys.sort();
     let hasContentToDisplay = false;
     const now = Date.now();
+    // Track which sources are present this tick for cleanup/reordering (normalized)
+    const presentTypes = new Set(sourceKeys.map(getSourceImage));
+
     for (let i = 0; i < sourceKeys.length; i++) {
         const sourceType = sourceKeys[i];
         if (sourceType === "uniqueId" || typeof combinedData[sourceType] !== 'object') {
@@ -908,20 +1054,125 @@ function processInput(data) {
             hasContentToDisplay = true;
             const sourceImgName = getSourceImage(sourceType);
             const sourceImgSrc = "./sources/images/" + sourceImgName + ".png";
-            let viewersHTML = "";
+
+            // Work with normalized data-type to avoid duplicates like kick-123 vs kick-456
+            const normalizedType = sourceImgName;
+            // Upsert holder for this source without replacing the image element
+            let holder = hypeContainer.querySelector(".sourceStatHolder[data-type='" + normalizedType + "']");
+            if (!holder) {
+                holder = document.createElement("div");
+                holder.className = "sourceStatHolder";
+                holder.dataset.type = normalizedType;
+
+                const img = document.createElement("img");
+                img.className = "sourceicons";
+                img.src = sourceImgSrc;
+                img.decoding = "async";
+                img.loading = "eager";
+                holder.appendChild(img);
+
+                if (showViewers) {
+                    const v = document.createElement("span");
+                    v.dataset.viewers = "true";
+                    v.dataset.type = normalizedType;
+                    holder.appendChild(v);
+                }
+                if (showChatters) {
+                    const c = document.createElement("span");
+                    c.dataset.chatters = "true";
+                    c.dataset.type = normalizedType;
+                    holder.appendChild(c);
+                }
+            } else {
+                // Ensure the expected spans exist if toggles changed since creation
+                if (showViewers && !holder.querySelector("span[data-viewers][data-type='" + normalizedType + "']")) {
+                    const v = document.createElement("span");
+                    v.dataset.viewers = "true";
+                    v.dataset.type = normalizedType;
+                    holder.appendChild(v);
+                }
+                if (showChatters && !holder.querySelector("span[data-chatters][data-type='" + normalizedType + "']")) {
+                    const c = document.createElement("span");
+                    c.dataset.chatters = "true";
+                    c.dataset.type = normalizedType;
+                    holder.appendChild(c);
+                }
+            }
+
+            // Update text values (including zero)
             if (showViewers) {
-                viewersHTML = "<span data-viewers='true' data-type='" + sourceType + "'>" + viewerCount + "</span>";
+                const v = holder.querySelector("span[data-viewers][data-type='" + normalizedType + "']");
+                if (v) v.textContent = isNaN(viewerCount) ? "0" : String(viewerCount);
             }
-            let chattersHTML = "";
             if (showChatters) {
-                chattersHTML = "<span data-chatters='true' data-type='" + sourceType + "'>" + chatterCount + "</span>";
+                const c = holder.querySelector("span[data-chatters][data-type='" + normalizedType + "']");
+                if (c) c.textContent = isNaN(chatterCount) ? "0" : String(chatterCount);
             }
-            if (viewersHTML || chattersHTML) {
-                hypeContainer.innerHTML += "<div class='sourceStatHolder'><img class='sourceicons' src='" +
-                    sourceImgSrc + "'>" + viewersHTML + chattersHTML + "</div>";
-            } else if (showViewers === false && showChatters === false) {}
+
+            // Maintain stable ordering without re-creating nodes
+            hypeContainer.appendChild(holder);
         }
     }
+    // Also reflect any aggregated viewer updates (ensures 0s still display like dock.html)
+    if (showViewers && aggregatedViewers && typeof aggregatedViewers === 'object') {
+        const aggKeys = Object.keys(aggregatedViewers);
+        aggKeys.sort();
+        for (let i = 0; i < aggKeys.length; i++) {
+            const type = aggKeys[i];
+            // Skip if normalized base already represented by any existing holder (eg: kick-123 present)
+            if (presentTypes.has(type)) continue; // already handled via combinedData
+            if (hypeContainer.querySelector(".sourceStatHolder[data-type='" + type + "'], .sourceStatHolder[data-type^='" + type + "-']")) {
+                continue;
+            }
+
+            hasContentToDisplay = true;
+            const sourceImgName = getSourceImage(type);
+            const sourceImgSrc = "./sources/images/" + sourceImgName + ".png";
+
+            let holder = hypeContainer.querySelector(".sourceStatHolder[data-type='" + type + "']");
+            if (!holder) {
+                holder = document.createElement("div");
+                holder.className = "sourceStatHolder";
+                holder.dataset.type = type;
+
+                const img = document.createElement("img");
+                img.className = "sourceicons";
+                img.src = sourceImgSrc;
+                img.decoding = "async";
+                img.loading = "eager";
+                holder.appendChild(img);
+
+                if (showViewers) {
+                    const v = document.createElement("span");
+                    v.dataset.viewers = "true";
+                    v.dataset.type = type;
+                    holder.appendChild(v);
+                }
+                if (showChatters) {
+                    const c = document.createElement("span");
+                    c.dataset.chatters = "true";
+                    c.dataset.type = type;
+                    holder.appendChild(c);
+                }
+            }
+
+            // Update values (chatters unknown here; default 0 if present)
+            const v = holder.querySelector("span[data-viewers][data-type='" + type + "']");
+            if (v) v.textContent = String(aggregatedViewers[type] || 0);
+            const c = holder.querySelector("span[data-chatters][data-type='" + type + "']");
+            if (c && !c.textContent) c.textContent = "0";
+
+            hypeContainer.appendChild(holder);
+            presentTypes.add(type);
+        }
+    }
+    // Optional cleanup: remove holders for sources not in the current payload
+    hypeContainer.querySelectorAll('.sourceStatHolder').forEach(function(node){
+        const t = node.dataset.type;
+        if (!presentTypes.has(t)) {
+            node.remove();
+        }
+    });
     if (hasContentToDisplay) {
         parentHolder.classList.remove("hidden");
     } else {
@@ -958,28 +1209,57 @@ eventer(messageEvent, function(e) {
         if ("overlayNinja" in e.data.dataReceived) {
             var data = e.data.dataReceived.overlayNinja;
             
-            // Handle new viewer_updates format by converting to hype format
+            // Handle new viewer_updates format by caching aggregated counts (incl. zeros)
             if (data.event === "viewer_updates" && data.meta && typeof data.meta === "object") {
-                // Since viewer counts are now handled upstream, we just need to update our local tracking
-                // The actual hype data will come through the regular hype updates
-                console.log("Received aggregated viewer updates:", data.meta);
-                
-                // Update lastUpdated to prevent sources from being hidden prematurely
+                const meta = data.meta || {};
                 const now = Date.now();
-                Object.keys(data.meta).forEach(function(platform) {
-                    if (data.meta[platform] > 0) {
-                        // If combining YouTube, only track "youtube" not "youtubeshorts"
-                        if (combineYouTube && platform === "youtubeshorts") {
-                            lastUpdated["youtube"] = now;
-                            hasViewerCount["youtube"] = true;
+
+                // Build aggregated viewers map honoring combine flags
+                let nextAgg = {};
+                if (combineAll) {
+                    let total = 0;
+                    Object.keys(meta).forEach(k => { total += parseInt(meta[k]) || 0; });
+                    nextAgg = { global: total };
+                } else if (combineYouTube) {
+                    let yt = 0;
+                    Object.keys(meta).forEach(k => {
+                        const val = parseInt(meta[k]) || 0;
+                        if (k === 'youtube' || k === 'youtubeshorts') {
+                            yt += val;
                         } else {
-                            lastUpdated[platform] = now;
-                            hasViewerCount[platform] = true;
+                            nextAgg[k] = val;
                         }
+                    });
+                    nextAgg.youtube = yt;
+                } else {
+                    Object.keys(meta).forEach(k => { nextAgg[k] = parseInt(meta[k]) || 0; });
+                }
+                aggregatedViewers = nextAgg;
+
+                // Update tracking info (kept for potential staleness logic)
+                Object.keys(aggregatedViewers).forEach(function(platform) {
+                    if (aggregatedViewers[platform] >= 0) {
+                        lastUpdated[platform] = now;
+                        hasViewerCount[platform] = aggregatedViewers[platform] > 0;
                     }
                 });
-                
-                // Don't process this as hype data, wait for the actual hype update
+
+                if (showViewers) {
+                    const hypeContainer = document.getElementById("hype");
+                    if (hypeContainer) {
+                        Object.keys(aggregatedViewers).forEach(function(platform) {
+                            const holder = hypeContainer.querySelector(".sourceStatHolder[data-type='" + platform + "']");
+                            if (!holder) return;
+                            const viewerSpan = holder.querySelector("span[data-viewers][data-type='" + platform + "']");
+                            if (viewerSpan) {
+                                const value = aggregatedViewers[platform];
+                                viewerSpan.textContent = isNaN(value) ? "0" : String(value);
+                            }
+                        });
+                    }
+                }
+
+                // Do not short-circuit; allow subsequent hype updates to render.
                 return;
             }
             

@@ -2,58 +2,67 @@
 
 // Function to update connection status indicators
 function updateConnectionStatus() {
-    // These values would be populated by the actual background.js state
-    const wsConnected = window.socketserver && window.socketserver.readyState === 1;
+    // API WebSocket (optional)
+    const wsEnabled = !!(window.settings && (window.settings.socketserver || window.settings.server2 || window.settings.server3));
+    const wsConnected = (window.socketserver && window.socketserver.readyState === 1) || (window.socketserverDock && window.socketserverDock.readyState === 1);
     const wsStatus = document.getElementById('websocket-status');
     const wsText = document.getElementById('websocket-status-text');
-    
-    if (wsConnected) {
+    if (!wsEnabled) {
+        wsStatus.className = 'status-indicator status-inactive';
+        wsText.textContent = 'Disabled (optional)';
+    } else if (wsConnected) {
         wsStatus.className = 'status-indicator status-active';
         wsText.textContent = 'Connected';
     } else {
         wsStatus.className = 'status-indicator status-inactive';
         wsText.textContent = 'Disconnected';
     }
-    
-    // WebRTC status depends on iframe and connectedPeers
-    const hasIframe = !!window.iframe;
+
+    // Signaling (VDO.Ninja) and WebRTC peers
+    const signalingReady = !!(
+        (window.ninjaBridge && window.ninjaBridge.vdo && window.ninjaBridge.vdo.state && window.ninjaBridge.vdo.state.connected) ||
+        (window.iframe)
+    );
+    const transportReady = (!!window.iframe) || (window.ninjaBridge && typeof window.ninjaBridge.isReady === 'function' && window.ninjaBridge.isReady());
     const peerCount = Object.keys(window.connectedPeers || {}).length;
-    const webrtcConnected = hasIframe && peerCount > 0;
+    const webrtcConnected = transportReady && peerCount > 0;
+
+    // Signaling row
+    const sigStatusEl = document.getElementById('signaling-status');
+    const sigTextEl = document.getElementById('signaling-status-text');
+    if (sigStatusEl && sigTextEl) {
+        if (signalingReady) {
+            sigStatusEl.className = 'status-indicator status-active';
+            sigTextEl.textContent = window.iframe ? 'Active (iframe)' : 'Connected';
+        } else {
+            sigStatusEl.className = 'status-indicator status-inactive';
+            sigTextEl.textContent = 'Inactive';
+        }
+    }
+
+    // WebRTC row: warning when transport ready but no peers
     const rtcStatus = document.getElementById('webrtc-status');
     const rtcText = document.getElementById('webrtc-status-text');
-    
-    if (hasIframe) {
+    if (transportReady) {
         if (webrtcConnected) {
             rtcStatus.className = 'status-indicator status-active';
-            
-            // Get the peer labels
+            // Summarize peer labels
             const peerLabels = {};
-            Object.values(window.connectedPeers || {}).forEach(label => {
-                if (label) {
-                    peerLabels[label] = (peerLabels[label] || 0) + 1;
-                }
-            });
-            
-            // Format the peer label information
+            Object.values(window.connectedPeers || {}).forEach(label => { if (label) peerLabels[label] = (peerLabels[label] || 0) + 1; });
             let peerInfo = '';
             if (Object.keys(peerLabels).length > 0) {
-                peerInfo = ' (';
-                peerInfo += Object.entries(peerLabels)
-                    .map(([label, count]) => `${label}: ${count}`)
-                    .join(', ');
-                peerInfo += ')';
+                peerInfo = ' (' + Object.entries(peerLabels).map(([l,c]) => `${l}: ${c}`).join(', ') + ')';
             } else {
                 peerInfo = ` (${peerCount} unlabeled peers)`;
             }
-            
             rtcText.textContent = 'Connected' + peerInfo;
         } else {
-            rtcStatus.className = 'status-indicator status-inactive';
-            rtcText.textContent = 'Waiting for peers (iframe active)';
+            rtcStatus.className = 'status-indicator status-warning';
+            rtcText.textContent = signalingReady ? 'Signaling connected; waiting for peers' : 'Waiting for transport';
         }
     } else {
         rtcStatus.className = 'status-indicator status-inactive';
-        rtcText.textContent = 'Iframe not initialized';
+        rtcText.textContent = 'Transport not initialized';
     }
     
     // Extension status
@@ -223,7 +232,7 @@ function setupConsoleHook() {
     const originalError = console.error.bind(console);
     
     console.log = (...args) => {
-        originalLog(...args);
+        // originalLog(...args);
         const message = formatArguments(args);
         addLogMessage(message);
     };
@@ -269,22 +278,7 @@ function showDashboardView() {
     
 }
 
-function showEditorView() {
-    document.getElementById("dash").style.display = 'none';
-    document.getElementById("editorstyle").removeAttribute("disabled");
-    
-    document.getElementById("editor").style.opacity = '0';
-    document.getElementById("editor").style.display = 'block';
-    
-    void document.getElementById("editor").offsetWidth;
-    document.getElementById("editor").style.opacity = '1';
-    
-    document.getElementById("dashstyle").setAttribute("disabled", "true");
-    
-    document.body.style.padding = '0';
-    document.body.style.overflow = 'hidden';
-	
-}
+// Duplicate showEditorView removed - using the one defined earlier
 
 function setupReturnButton() {
     const returnButton = document.getElementById('return-to-dashboard');
@@ -300,16 +294,60 @@ function setupReturnButton() {
             showEditorView();
         });
     }
+    
+    const backToDashboardButton = document.getElementById('back-to-dashboard');
+    if (backToDashboardButton) {
+        backToDashboardButton.addEventListener('click', function() {
+            showDashboardView();
+        });
+    }
 }
 // Main initialization function
 function initDashboard() {
-    if (new URLSearchParams(window.location.search).has('ssapp')) {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has('ssapp')) {
         document.body.classList.add('ssapp');
     }
     document.getElementById("editorstyle").setAttribute("disabled", "true");
     setupConsoleHook();
     setupPeriodicUpdates();
 	setupReturnButton();
+	
+	// Listen for postMessage from parent window (for cross-origin communication)
+	window.addEventListener('message', function(event) {
+		// Only handle messages with the expected structure
+		if (event.data && event.data.action) {
+			if (event.data.action === 'showDashboardView' && typeof showDashboardView === 'function') {
+				showDashboardView();
+			} else if (event.data.action === 'showEditorView' && typeof showEditorView === 'function') {
+				showEditorView();
+			}
+		}
+	});
+	
+	// Check if we should show the editor view initially
+	if (urlParams.get('view') === 'editor') {
+		// Show editor view initially
+		setTimeout(() => {
+			showEditorView();
+		}, 100);
+	}
+	
+	// Check if we should show editor based on hash
+	if (window.location.hash === '#editor') {
+		setTimeout(() => {
+			showEditorView();
+		}, 100);
+	}
+	
+	// Listen for hash changes to switch views
+	window.addEventListener('hashchange', function() {
+		if (window.location.hash === '#editor') {
+			showEditorView();
+		} else if (window.location.hash === '#dashboard' || !window.location.hash) {
+			showDashboardView();
+		}
+	});
 }
 
 if (document.readyState === "complete" || document.readyState === "interactive") {

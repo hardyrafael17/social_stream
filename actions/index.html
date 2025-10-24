@@ -7,10 +7,28 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <!-- Loading Modal -->
+    <div id="loading-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+        <div style="background: #2d3142; padding: 30px; border-radius: 8px; text-align: center; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);">
+            <h2 style="margin: 0 0 20px 0; color: #e0e0e0;">Loading Event Flow Editor</h2>
+            <div style="margin: 20px 0;">
+                <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #4a5568; border-top: 4px solid #2a9d8f; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+            </div>
+            <p style="color: #a0a0a0; margin: 10px 0 0 0;">Initializing system...</p>
+        </div>
+    </div>
+    <style>
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    
     <div class="editor-container">
         <div class="editor-header">
             <div class="editor-title">Event Flow Editor</div>
-			<div style="font-size:66%;max-width:50%;">The Flow Editor lets you create custom and complex triggers and action workflows. Have fun with your stream!</div>
+			<div style="font-size:66%;max-width:50%;">The Flow Editor lets you create custom and complex triggers and action workflows. Have fun with your stream!<br>
+			<span style="margin-top: 5px; display: inline-block;">⚡ For media playback and OBS actions, add the Actions Overlay to your stream (available via settings menu)</span></div>
             <div class="editor-actions">
                 <button id="open-test-panel" class="btn">🧪 Test Flow</button>
             </div>
@@ -22,9 +40,12 @@
     </div>
 
     <!-- Test Panel -->
-    <div class="test-overlay" id="test-overlay"></div>
-    <div class="test-panel" id="test-panel">
-        <h3>Test Flow</h3>
+    <div class="test-overlay" style="display:none;" id="test-overlay"></div>
+    <div class="test-panel" style="display:none;" id="test-panel">
+        <div class="test-panel-header">
+            <h3>Test Flow</h3>
+        </div>
+        <div class="test-panel-content">
         <div class="test-group">
             <label for="test-source">Source Platform:</label>
             <select id="test-source">
@@ -76,8 +97,20 @@
             <input type="text" id="test-donation-amount" value="$5.00">
         </div>
         
+        <div class="test-options">
+            <label class="test-checkbox">
+                <input type="checkbox" id="test-all-active-flows">
+                Test against all active flows (not just current flow)
+            </label>
+        </div>
+
+        <div class="test-warning" id="unsaved-flow-warning" style="display: none; color: #e76f51; margin: 10px 0;">
+            <strong>Warning:</strong> The current flow has unsaved changes. Test results may not reflect the latest changes.
+        </div>
+        
         <div class="test-results" id="test-results">
             <p>Test results will appear here after running a test.</p>
+        </div>
         </div>
         
         <div class="test-buttons">

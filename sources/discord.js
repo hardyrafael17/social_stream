@@ -1,8 +1,8 @@
 (function () {
 	 
-	
 	var isExtensionOn = true;
-function toDataURL(url, callback) {
+	
+	function toDataURL(url, callback) {
 	  var xhr = new XMLHttpRequest();
 	  xhr.onload = function() {
 		  
@@ -82,13 +82,23 @@ function toDataURL(url, callback) {
 		return resp;
 	}
 
-
+ 	function getTranslation(key, value = false) {
+		if (settings.translation && settings.translation.innerHTML && key in settings.translation.innerHTML) {
+			// these are the proper translations
+			return settings.translation.innerHTML[key];
+		} else if (settings.translation && settings.translation.miscellaneous && settings.translation.miscellaneous && key in settings.translation.miscellaneous) {
+			return settings.translation.miscellaneous[key];
+		} else if (value !== false) {
+			return value;
+		} else {
+			return key.replaceAll("-", " "); //
+		}
+	}
 
 	var lastMessage = "";
 	var textSettingsArray = [];
 	
 	function processMessage(ele){
-		// console.log(ele);
 		
 		var mid = ele.id.split("chat-messages-");
 		if (mid.length==2){
@@ -98,6 +108,7 @@ function toDataURL(url, callback) {
 		}
 		
 		if (!settings.discord && !(window.ninjafy || window.electronApi)){
+			console.log("FAIL");
 			// discord isn't allowed via settings
 			return;
 		}
@@ -115,7 +126,7 @@ function toDataURL(url, callback) {
 		} else {
 			mid = mid[0];
 		}
-	
+		var nameColor = "";
 		var chatimg = "";
 		try{
 		   chatimg = ele.querySelector("img[class*='avatar-'],img[class*='avatar_']").src+"";
@@ -124,7 +135,11 @@ function toDataURL(url, callback) {
 		var bot = false;
 		var name="";
 		try {
-			name = getAllContentNodes(ele.querySelector("#message-username-"+mid+" [class^='username']"), true).trim();
+			let ntt = ele.querySelector("#message-username-"+mid+" [class^='username']");
+			if (ntt){
+				name = getAllContentNodes(ntt, true).trim();
+				nameColor = ntt?.style?.color || "";
+			}
 			
 			if (ele.querySelector("#message-username-"+mid+" [class^='botTag_']")){
 				bot = true;
@@ -156,6 +171,7 @@ function toDataURL(url, callback) {
 		}
 		
 		
+		
 		if (!name && !chatimg){
 			for (var i=0; i<50;i++){
 				try {
@@ -165,7 +181,11 @@ function toDataURL(url, callback) {
 				}
 				try {
 					if (!name){
-						name = getAllContentNodes(ele.querySelector("[id^='message-username-'] [class^='username']"), true).trim();
+						let ntt = ele.querySelector("[id^='message-username-'] [class^='username']");
+						if (ntt){
+							name = getAllContentNodes(ntt, true).trim();
+							nameColor = ntt?.style?.color || "";
+						}
 					}
 				} catch(e){
 				}
@@ -193,15 +213,22 @@ function toDataURL(url, callback) {
 		if (bot){
 			data.bot = true;
 		}
+		if (!name){
+			data.event = true;
+		}
 		data.chatmessage = msg;
 		data.chatimg = chatimg;
+		data.nameColor = nameColor;
 		data.hasDonation = "";
 		data.membership = "";;
 		data.contentimg = contentimg;
 		data.textonly = settings.textonlymode || false;
 		data.type = "discord";
 		
-		console.log(data);
+		if (nameColor && settings.discordmemberships){
+			data.membership = getTranslation("membership", "MEMBERSHIP");
+		}
+		
 		
 		if (lastMessage === JSON.stringify(data)){ // prevent duplicates, as zoom is prone to it.
 			return;
@@ -247,7 +274,7 @@ function toDataURL(url, callback) {
 	chrome.runtime.sendMessage(chrome.runtime.id, { "getSettings": true }, function(response){  // {"state":isExtensionOn,"streamID":channel, "settings":settings}
 		if ("settings" in response){
 			settings = response.settings;
-			if (settings.customdiscordchannel.textsetting) {
+			if (settings?.customdiscordchannel?.textsetting) {
 				textSettingsArray = settings.customdiscordchannel.textsetting
 					.split(",")
 					.map(value => {

@@ -52,7 +52,8 @@
 		/* Minimal style */
 		@keyframes minimalScroll {
 			0% {
-				transform: translateY(100vh);
+				/* Use dynamic start offset; fallback keeps old behavior */
+				transform: translateY(var(--start-offset, 100vh));
 				opacity: 0;
 			}
 			
@@ -65,7 +66,8 @@
 			}
 			
 			100% {
-				transform: translateY(-300vh);
+				/* Use dynamic end offset; fallback keeps old behavior */
+				transform: translateY(calc(-1 * var(--end-offset, 300vh)));
 				opacity: 0;
 			}
 		}
@@ -73,7 +75,8 @@
 		/* Elegant style */
 		@keyframes elegantFade {
 			0% {
-				transform: translateY(50vh);
+				/* Use dynamic start offset; fallback keeps old behavior */
+				transform: translateY(var(--start-offset, 50vh));
 				opacity: 0;
 			}
 			
@@ -86,7 +89,8 @@
 			}
 			
 			100% {
-				transform: translateY(-300vh);
+				/* Use dynamic end offset; fallback keeps old behavior */
+				transform: translateY(calc(-1 * var(--end-offset, 300vh)));
 				opacity: 0;
 			}
 		}
@@ -438,11 +442,13 @@
 		/* Adjust standardRoll animation to fit shorter duration */
 		@keyframes standardRoll {
 			0% {
-				transform: translateY(100vh);
+				/* Use dynamic start offset; fallback keeps old behavior */
+				transform: translateY(var(--start-offset, 100vh));
 			}
 			
 			100% {
-				transform: translateY(-300vh);
+				/* Use dynamic end offset; fallback keeps old behavior */
+				transform: translateY(calc(-1 * var(--end-offset, 300vh)));
 			}
 		}
 		
@@ -528,9 +534,12 @@
 
     <script>
 	
-	// Get URL parameters
-	const urlParams = new URLSearchParams(window.location.search);
-	const donationPriority = urlParams.has('donationpriority');
+    // Get URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const donationPriority = urlParams.has('donationpriority');
+    // Session security and network options
+    const password = urlParams.get('password') || 'false';
+    const lanonly = urlParams.has('lanonly') ? '&lanonly' : '';
 	
 	// User tracking
 	const users = new Map();
@@ -709,9 +718,9 @@
 	}
 
 	// IFRAME setup for Social Stream Ninja
-	const iframe = document.createElement("iframe");
-	const filename = "dock";
-	iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&notmobile&notmobile&password=false&solo&view=" + urlParams.get('session') + "&novideo&noaudio&label=" + filename + "&cleanoutput&room=" + urlParams.get('session');
+    const iframe = document.createElement("iframe");
+    const filename = "dock";
+    iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&notmobile&notmobile&password=" + encodeURIComponent(password) + lanonly + "&solo&view=" + urlParams.get('session') + "&novideo&noaudio&label=" + filename + "&cleanoutput&room=" + urlParams.get('session');
 	iframe.style.width = "0px";
 	iframe.style.height = "0px";
 	iframe.style.position = "fixed";
@@ -761,12 +770,34 @@
 		document.body.style.backgroundImage = "none";
 	}
 
+	// Optional: force transparent/no background
+	if (urlParams.has('nobg')) {
+		// Ensure the body itself is transparent
+		document.body.style.background = '#0000';
+		document.body.style.backgroundImage = 'none';
+		// Hide overlay background layers that might still be visible
+		const bgLayer = document.querySelector('.background');
+		if (bgLayer) bgLayer.style.display = 'none';
+		const fadeLayer = document.querySelector('.fade');
+		if (fadeLayer) fadeLayer.style.display = 'none';
+		// Keep star field for Star Wars only; hide stars otherwise
+		if (creditsStyle !== 'starwars') {
+			const spaceEl = document.getElementById('space');
+			if (spaceEl) spaceEl.style.display = 'none';
+		}
+	}
+
 
 	// Set animation speed
 	const speed = parseFloat(urlParams.get('speed') || "1");
+	const durationParam = parseFloat(urlParams.get('duration') || "");
 
-	// Set different default speeds based on style
-	if (speed !== 1) {
+	// Duration has priority over speed if provided
+	if (Number.isFinite(durationParam) && durationParam > 0) {
+		const fixedDuration = `${durationParam}s`;
+		document.documentElement.style.setProperty('--animation-speed', fixedDuration);
+		document.documentElement.style.setProperty('--standard-speed', fixedDuration);
+	} else if (speed !== 1) {
 		// If speed parameter is provided, apply it to both animation types
 		const starWarsSpeed = `${600 / speed}s`;
 		const standardSpeed = `${60 / speed}s`;
@@ -829,62 +860,159 @@
 		}
 	}
 
-	// Handle message events
-	const eventMethod = window.addEventListener ? "addEventListener" : "attachEvent";
-	const eventer = window[eventMethod];
-	const messageEvent = eventMethod === "attachEvent" ? "onmessage" : "message";
-	eventer(messageEvent, function (e) {
-		if (e.source != iframe.contentWindow) return;
-		if ("dataReceived" in e.data) {
-			if ("overlayNinja" in e.data.dataReceived) {
-				processData(e.data.dataReceived.overlayNinja);
-			}
+    // Handle message events
+    const eventMethod = window.addEventListener ? "addEventListener" : "attachEvent";
+    const eventer = window[eventMethod];
+    const messageEvent = eventMethod === "attachEvent" ? "onmessage" : "message";
+    eventer(messageEvent, function (e) {
+        if (e.source != iframe.contentWindow) return;
+        if ("dataReceived" in e.data) {
+            if ("overlayNinja" in e.data.dataReceived) {
+                processData(e.data.dataReceived.overlayNinja);
+            }
+        }
+    });
+
+    // Optional: Extension server relay (server2/server3) for dock-labeled pages
+    (function setupExtensionSocket(){
+        if (!(urlParams.has('server2') || urlParams.has('server3'))) return;
+        let serverURL = urlParams.has('server2') ? (urlParams.get('server2') || 'wss://io.socialstream.ninja/extension') : (urlParams.get('server3') || 'wss://io.socialstream.ninja/extension');
+        let socket = null;
+        let attempts = 1;
+        function connect(){
+            if (socket) {
+                socket.onclose = null; try { socket.close(); } catch(e){}
+            }
+            socket = new WebSocket(serverURL);
+            socket.onopen = function(){
+                attempts = 1;
+                const session = (urlParams.get('session') || '').split(',')[0];
+                socket.send(JSON.stringify({ join: session, out: 3, in: 4 }));
+            };
+            socket.onclose = function(){
+                setTimeout(connect, 100 * attempts++);
+            };
+            socket.onerror = function(){ try { socket.close(); } catch(e){} };
+            socket.addEventListener('message', function(event){
+                if (!event.data) return;
+                try {
+                    const data = JSON.parse(event.data);
+                    processData(data);
+                    if (data.get) {
+                        const ret = { callback: { get: data.get, result: true } };
+                        socket.send(JSON.stringify(ret));
+                    }
+                } catch(e) { /* ignore parse errors */ }
+            });
+        }
+        connect();
+    })();
+
+	// Shared helpers for visibility toggles
+	const creditsContent = document.getElementById('credits-content');
+
+	function applyAdaptiveOffsets() {
+		try {
+			const viewportHeight = appElement.clientHeight || window.innerHeight;
+			const paddingTop = parseFloat(getComputedStyle(textContainer).paddingTop) || 0;
+			const contentHeight = creditsContent ? creditsContent.scrollHeight : 0;
+			const footerHeightValue = footerText ? footerText.scrollHeight : 0;
+			const startPx = (creditsStyle === 'elegant') ? (0.5 * viewportHeight) : (1.0 * viewportHeight);
+			const extraOutPx = Math.round(0.25 * viewportHeight);
+			const endPx = paddingTop + contentHeight + footerHeightValue + extraOutPx;
+
+			textContainer.style.setProperty('--start-offset', `${Math.round(startPx)}px`);
+			textContainer.style.setProperty('--end-offset', `${Math.max(0, Math.round(endPx))}px`);
+		} catch (e) {
+			console.warn('Could not compute adaptive scroll offsets:', e);
 		}
+	}
+
+	function restartScrollAnimation() {
+		textContainer.classList.remove('fadeout');
+		textContainer.classList.remove('animate');
+		void textContainer.offsetWidth;
+		textContainer.classList.add('animate');
+	}
+
+	function startCredits() {
+		creditsContent.innerHTML = generateCreditsContent();
+		document.body.classList.add('visible');
+		appElement.classList.add('visible');
+
+		const startAnimation = () => {
+			applyAdaptiveOffsets();
+			restartScrollAnimation();
+		};
+
+		if (document.fonts && document.fonts.ready) {
+			document.fonts.ready.then(startAnimation).catch(startAnimation);
+		} else {
+			setTimeout(startAnimation, 100);
+		}
+	}
+
+	function stopCredits(options = {}) {
+		const keepFadeout = options.keepFadeout || false;
+		if (!keepFadeout) {
+			textContainer.classList.remove('fadeout');
+		}
+		textContainer.classList.remove('animate');
+		appElement.classList.remove('visible');
+		document.body.classList.remove('visible');
+	}
+
+	function handleVisibilityState(visible) {
+		if (visible) {
+			startCredits();
+		} else {
+			stopCredits();
+		}
+	}
+
+	document.addEventListener('visibilitychange', function () {
+		handleVisibilityState(!document.hidden);
 	});
 
-	// Handle visibility changes
-	document.addEventListener('visibilitychange', function() {
-		if (!document.hidden) {
-			// Page becomes visible
-			document.body.classList.add('visible');
-			appElement.classList.add('visible');
-			
-			// Generate and insert credits content
-			const creditsContent = document.getElementById('credits-content');
-			creditsContent.innerHTML = generateCreditsContent();
-			
-			// Force a reflow before starting animation
-			void textContainer.offsetWidth;
-			
-			// Ensure fadeout class is removed
-			textContainer.classList.remove('fadeout');
-			
-			// Small delay before adding animation class
-			setTimeout(() => {
-				textContainer.classList.add('animate');
-			}, 50);
-		} else {
-			// Page becomes hidden
-			document.body.classList.remove('visible');
-			appElement.classList.remove('visible');
-			textContainer.classList.remove('fadeout');
-			
-			// Remove animation class to reset position
-			textContainer.classList.remove('animate');
+	if (window.obsstudio) {
+		try {
+			const existingVisibilityHandler = window.obsstudio.onVisibilityChange;
+			window.obsstudio.onVisibilityChange = function (visible) {
+				handleVisibilityState(!!visible);
+				if (typeof existingVisibilityHandler === 'function') {
+					existingVisibilityHandler(visible);
+				}
+			};
+
+			if ('onActiveChange' in window.obsstudio) {
+				const existingActiveHandler = window.obsstudio.onActiveChange;
+				window.obsstudio.onActiveChange = function (active) {
+					if (typeof active === 'boolean') {
+						handleVisibilityState(active);
+					}
+					if (typeof existingActiveHandler === 'function') {
+						existingActiveHandler(active);
+					}
+				};
+			}
+		} catch (err) {
+			console.warn('OBS visibility callbacks unavailable:', err);
 		}
-	});
+	} else if (!document.hidden) {
+		// Non-OBS environments: start immediately so manual previews still work.
+		startCredits();
+	}
 
 	// Handle animation end
 	document.querySelector('.text-container').addEventListener('animationend', function() {
 		// Clear collected names when animation completes
 		users.clear();
-		
+
 		// Apply fadeout class
 		this.classList.add('fadeout');
-		
-		// Hide the app
-		document.getElementById('app').classList.remove('visible');
-		document.body.classList.remove('visible');
+
+		// Hide the app while keeping the fadeout applied
+		stopCredits({ keepFadeout: true });
 	});
     </script>
 </body>

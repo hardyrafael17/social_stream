@@ -295,6 +295,28 @@
 		return result;
 	}
 	
+	function getTextWithSpaces(element) {
+	  let textArray = [];
+	  
+	  function traverse(node) {
+		if (node.nodeType === Node.TEXT_NODE) {
+		  const trimmed = node.textContent.trim();
+		  if (trimmed) {
+			textArray.push(trimmed);
+		  }
+		} else if (node.nodeType === Node.ELEMENT_NODE) {
+		  if (node.tagName !== 'SCRIPT' && node.tagName !== 'STYLE') {
+			for (const child of node.childNodes) {
+			  traverse(child);
+			}
+		  }
+		}
+	  }
+	  
+	  traverse(element);
+	  return textArray;
+	}
+
 	var lastMessage = "";
 	var lastUser = "";
 	var lastEle = null;
@@ -354,6 +376,8 @@
 		var subscriber = "";
 		var subtitle = "";
 		var eventtype = ""; 
+		var crossChat = "";
+		
 		try {
 			ele.querySelectorAll(SELECTORS.chatBadges).forEach(badge => {
 				if (badge.alt && badge.alt.includes("Subscriber")){
@@ -363,7 +387,37 @@
 					if (subtitle && subtitle.endsWith("-Month") && (subtitle!=="1-Month")){
 						subtitle+="s";
 					}
+				} else if (badge.alt && badge.alt.includes("Suscriptor")){
+				   subscriber = "Suscriptor";
+				} else if (badge.alt && badge.alt.includes("Abonné")){
+				   subscriber = "Abonné";
+				} else if (badge.alt && badge.alt.includes("Abonnent")){
+				   subscriber = "Abonnent";
+				} else if (badge.alt && badge.alt.includes("Abbonato")){
+				   subscriber = "Abbonato";
+				} else if (badge.alt && badge.alt.includes("Assinante")){
+				   subscriber = "Assinante";
+				} else if (badge.alt && badge.alt.includes("Abonnee")){
+				   subscriber = "Abonnee";
+				} else if (badge.alt && badge.alt.includes("Prenumerant")){
+				   subscriber = "Prenumerant";
+				} else if (badge.alt && badge.alt.includes("Подписчик")){
+				   subscriber = "Подписчик";
+				} else if (badge.alt && badge.alt.includes("订阅者")){
+				   subscriber = "订阅者";
+				} else if (badge.alt && badge.alt.includes("購読者")){
+				   subscriber = "購読者";
+				} else if (badge.alt && badge.alt.includes("구독자")){
+				   subscriber = "구독자";
 				}
+				
+				if (badge.alt && badge.alt.includes(", ")){
+					let name11 = badge.alt.split(", ").pop();
+					if (name11){
+						crossChat = "https://api.socialstream.ninja/twitch/?username=" + encodeURIComponent(name11);
+					}
+				}
+				
 				if (badge.srcset) {
 					let bb = badge.srcset.split("https://").pop();
 					if (bb) {
@@ -412,6 +466,10 @@
 			}
 		} catch (e) {}
 		
+		let crossChatChannelIcon = ele.querySelector(".tw-image-avatar[src]");
+		if (crossChatChannelIcon){
+			crossChatChannelIcon = crossChatChannelIcon.src;
+		}
 
 		var contentimg = ele.querySelector("img[src].chat-line__message--emote-gigantified") || "";
 		
@@ -519,8 +577,6 @@
 				return;
 			}
 		}
-		
-		
 
 		try {
 			if (!donations) {
@@ -685,6 +741,13 @@
 		if (brandedImageURL) {
 			data.sourceImg = brandedImageURL;
 		}
+		if (crossChat){
+			data.sourceImg = crossChat;
+		}
+		if (crossChatChannelIcon){
+			data.sourceImg = crossChatChannelIcon;
+		}
+		
 		if (data.hasDonation){
 			data.title = getTranslation("cheers", "CHEERS");
 		}
@@ -696,7 +759,9 @@
 					message: data
 				},
 				function (e) {
-					ele.dataset.mid = e.id;
+					if (e?.id){
+						ele.dataset.mid = e.id;
+					}
 				}
 			);
 		} catch (e) {
@@ -714,8 +779,12 @@
 	if (chrome && chrome.runtime) {
 		chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 			try {
-				if ("getSource" == request){sendResponse("twitch");	return;	}
+				if ("getSource" === request) {
+					sendResponse("twitch");
+					return;
+				}
 				if ("focusChat" == request) {
+					// console.log("FOCUS");
 					if (!isExtensionOn || document.referrer.includes("twitch.tv/popout/")) {
 						return;
 					}
@@ -777,10 +846,11 @@
 		chrome.runtime.sendMessage(
 			chrome.runtime.id, {getSettings: true},	function (response) {
 				// {"state":isExtensionOn,"streamID":channel, "settings":settings}
-				//console.log(response);
+				//console.log(response, response.settings);
 				
 				if (response && "settings" in response) {
 					settings = response.settings;
+					//console.log({...settings});
 					if (settings.bttv && !BTTV) {
 						chrome.runtime.sendMessage(chrome.runtime.id, { getBTTV: true, channel: channelName ? channelName.toLowerCase() : null, type:"twitch" }, function (response) {
 								//console.log(response);
@@ -798,7 +868,10 @@
 					}
 				}
 				if (response && "state" in response) {
+					
 					isExtensionOn = response.state;
+					
+					checkFollowers();
 				}
 			}
 		);
@@ -884,8 +957,17 @@
 		ele.dataset.ignore = true;
 		
 		var data = {};
-		data.chatname = "";
-		data.chatbadges = "";
+		var displayName = "";
+		var displayNameEle = ele.querySelector(SELECTORS.displayName); 
+		if (displayNameEle){
+			displayName = displayNameEle.innerText;
+			if (displayName){
+				displayName = escapeHtml(displayName);
+				displayName = hideContentInParentheses(displayName).trim();
+			}
+		}
+		data.chatname = displayName;
+		data.chatbadges = [];
 		data.nameColor = "";
 		data.chatmessage = getAllContentNodes(ele,"event");
 		data.chatimg = "";
@@ -895,17 +977,25 @@
 		data.textonly = settings.textonlymode || false;
 		data.event = true;
 		
-		// channel-points-reward-line__icon
-		if (ele.querySelector("[class*='channel-points-reward']")){
-			data.event = "reward";
-		}
-
 		if (!data.chatmessage) {
 			return;
 		}
+		
+		// channel-points-reward-line__icon
+		if (ele.querySelector("[class*='channel-points-reward']")){
+			data.event = "reward";
+		} else if (data.chatmessage.includes(" gifting ") && data.chatmessage.includes(" Sub")) {
+			data.event = "giftpurchase";
+		} else if (data.chatmessage.includes(" gifted ") && data.chatmessage.includes(" Sub")) {
+			data.event = "sponsorship";
+		}
+		
 
 		if (brandedImageURL) {
 			data.sourceImg = brandedImageURL;
+		}
+		if (channelName){
+			data.sourceName = channelName;
 		}
 
 		try {
@@ -1172,30 +1262,61 @@
 			fetch('https://api.socialstream.ninja/twitch/viewers?username='+channelName)
 			  .then(response => response.text())
 			  .then(count => {
+				let viewerCount = 0; // Default to 0 if invalid
 				try {
 					if (count == parseInt(count)){
-						chrome.runtime.sendMessage(
-							chrome.runtime.id,
-							({message:{
-									type: 'twitch',
-									event: 'viewer_update',
-									meta: parseInt(count)
-									//chatmessage: data.data[0] + " has started following"
-								}
-							}),
-							function (e) {}
-						);
+						viewerCount = parseInt(count);
 					}
 				} catch (e) {
 					//console.log(e);
-				}				
-				  //console.log('Viewer count:', count);
+				}
+
+				// Always send viewer update (even if 0) to clear stale counts
+				chrome.runtime.sendMessage(
+					chrome.runtime.id,
+					({message:{
+							type: 'twitch',
+							event: 'viewer_update',
+							meta: viewerCount
+						}
+					}),
+					function (e) {}
+				);
+				  //console.log('Viewer count:', viewerCount);
+			  })
+			  .catch(error => {
+				// Send 0 on fetch error to clear stale counts
+				chrome.runtime.sendMessage(
+					chrome.runtime.id,
+					({message:{
+							type: 'twitch',
+							event: 'viewer_update',
+							meta: 0
+						}
+					}),
+					function (e) {}
+				);
 			  });
+		}
+		
+		if (isExtensionOn && document.querySelector(".community-highlight")){
+			let message = getTextWithSpaces(document.querySelector(".community-highlight"));
+			
+			chrome.runtime.sendMessage(
+				chrome.runtime.id,
+				({message:{ 
+						type: 'twitch',
+						event: 'community_highlight',
+						meta: message
+					}
+				}),
+				function (e) {}
+			);
 		}
 	}
 	
-	setTimeout(function(){checkFollowers();},2500);
 	setInterval(function(){checkFollowers()},30000);
+	
 
 	///////// the following is a loopback webrtc trick to get chrome to not throttle this tab when not visible.
 	try {
@@ -1252,7 +1373,6 @@
 		});
 		element.dispatchEvent(focusEvent);
 	}
-
 	
 	function preventBackgroundThrottling() {
 		window.onblur = null;

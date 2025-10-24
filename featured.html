@@ -775,15 +775,24 @@
 		/* Fix name positioning */
 		.no-avatar .hl-name {
 		  margin-bottom: 0; /* Remove the gap */
-		  max-width: calc(100% - 20px);
 		  overflow: hidden;
 		  text-overflow: ellipsis;
 		  z-index: 3;
+		  left: 20px; /* keep name close to the message when avatar is hidden */
 		}
 
 		.no-avatar .hl-message {
 		  margin-bottom: 0;
 		  border-radius: var(--rounded-border-radius);
+		  /* remove the large left padding reserved for avatar */
+		  padding: 20px 35px 20px 35px;
+		}
+
+		/* Right-aligned adjustments when avatar is hidden */
+		.alignright .no-avatar .hl-name {
+		  right: 20px;
+		  left: unset;
+		  margin-left: 0;
 		}
 
 		/* Adjustments for source icon in no avatar mode */
@@ -857,6 +866,13 @@
 		  font-weight: bold;
 		  border-radius: 0;
 		}
+		
+		.donation.membership .subtitle {
+			font-size: 16px;
+			line-height: 1.1;
+		}
+		
+		
 
 		.no-avatar .donation::after {
 		  display: none;
@@ -869,6 +885,7 @@
 			<source src="./audio/tone.mp3" type="audio/mpeg" />
 			<source src="./audio/tone.ogg" type="audio/ogg" />
 		</audio>
+		<script type="text/javascript" src="tts.js"></script>
 		<script>
 			function log(msg) {
 				//	console.log(msg);
@@ -917,6 +934,31 @@
 					return await fetch(URL);
 				}
 			}
+			// Avatar cache Map and helper functions
+			const avatarCache = new Map();
+			
+			function getCachedAvatar(username) {
+				if (!username) return null;
+				const cached = avatarCache.get(username.toLowerCase());
+				if (cached) {
+					// Check if cache is still valid (24 hours)
+					if (Date.now() - cached.timestamp < 24 * 60 * 60 * 1000) {
+						return cached.url;
+					}
+					// Cache expired, remove it
+					avatarCache.delete(username.toLowerCase());
+				}
+				return null;
+			}
+			
+			function setCachedAvatar(username, url) {
+				if (!username || !url) return;
+				avatarCache.set(username.toLowerCase(), {
+					url: url,
+					timestamp: Date.now()
+				});
+			}
+			
 			var translation = {};
 			async function changeLg(lang="en", retry=false) {
 				log("changeLg: " + lang);
@@ -1059,7 +1101,13 @@
 
 							if (data.type && (data.type == "twitch") && data.chatname) {
 								if (!data.chatimg || data.chatimg.startsWith("https://api.socialstream.ninja")){
-									data.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(data.chatname); // 150x150
+									// Check cache first
+									const cachedUrl = getCachedAvatar(data.chatname);
+									if (cachedUrl) {
+										data.chatimg = cachedUrl;
+									} else {
+										data.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(data.chatname); // 150x150
+									}
 								}
 							}
 
@@ -1091,6 +1139,26 @@
 					};
 			})(window);
 			var urlParams = new URLSearchParams(window.location.search);
+			var fallbackAvatarURL = "./sources/images/unknown.png";
+			if (urlParams.has("fallbackimg")) {
+				var fallbackParam = urlParams.get("fallbackimg");
+				if (fallbackParam) {
+					fallbackParam = fallbackParam.trim();
+					if (fallbackParam) {
+						var fallbackParamLower = fallbackParam.toLowerCase();
+						if (
+							fallbackParamLower.startsWith("http://") ||
+							fallbackParamLower.startsWith("https://") ||
+							fallbackParam.startsWith("//") ||
+							fallbackParamLower.startsWith("data:image/") ||
+							fallbackParam.startsWith("./") ||
+							fallbackParam.startsWith("../")
+						) {
+							fallbackAvatarURL = fallbackParam;
+						}
+					}
+				}
+			}
 			
 			function validateRoomId(roomId) {
 				if (roomId == null || roomId === '') {
@@ -1331,10 +1399,7 @@
 				});
 			}
 
-			var beepwords = false;
-			if (urlParams.has("beepwords")) {
-				beepwords = true;
-			}
+			// beepwords is now handled by TTS.configure()
 			
 			var pseudodock = false;
 			if (urlParams.has("autoshow")) {
@@ -1395,9 +1460,12 @@
 				var currentFont = getComputedStyle(document.documentElement).getPropertyValue("--font-family").trim();
 				document.documentElement.style.setProperty("--font-family", "'" + fontName.replaceAll("+", " ") + "', " + currentFont);
 			}
-
-			if (urlParams.get("font")) {
-				document.documentElement.style.setProperty("--font-family", urlParams.get("font") + ", Avenir Next, Sora, Roboto, Helvetica, Geneva, Verdana, Arial, sans-serif");
+			
+			if (urlParams.get('font')) {
+				const raw = urlParams.get('font').trim();
+				const clean = raw.replace(/^['"]|['"]$/g, '');
+				const escaped = clean.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				document.documentElement.style.setProperty('--font-family', `"${escaped}", Sora, Roboto, Helvetica, Geneva, Verdana, Arial, sans-serif`);
 			}
 
 			if (urlParams.get("googlefont")) {
@@ -1490,8 +1558,31 @@
 				document.documentElement.style.setProperty("--author-left", "20px");
 			}
 
-			var audioContext = new (window.AudioContext || window.webkitAudioContext)();
+			// New: hide only placeholder/default avatar when the user has no real avatar
+			// Usage: add &noavatarifmissing to the URL
+			var noAvatarIfMissing = false;
+			if (urlParams.has("noavatarifmissing")) {
+				noAvatarIfMissing = true;
+			}
+
+			// Lazy initialize audioContext to handle autoplay policy
+			let audioContext = null;
+			let waitingForUserGesture = false;
 			var timeoutTone = null;
+			
+			function initAudioContext() {
+				if (!audioContext && (typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined')) {
+					try {
+						const AudioCtx = window.AudioContext || window.webkitAudioContext;
+						audioContext = new AudioCtx();
+					} catch (e) {
+						// Don't warn about user gesture errors
+						if (!e.message || !e.message.includes('user gesture')) {
+							console.warn('Failed to create AudioContext:', e);
+						}
+					}
+				}
+			}
 
 			async function playtone(tonename = "testtone") {
 				if (timeoutTone) {
@@ -1503,10 +1594,25 @@
 					timeoutTone = false;
 				}, 500);
 
-				if (audioContext.state == "suspended") {
-					await audioContext.resume();
+				// Initialize audio context on first use
+				if (!audioContext) {
+					initAudioContext();
 				}
-				if (audioContext.state == "suspended") {
+				
+				if (audioContext && audioContext.state == "suspended") {
+					try {
+						await audioContext.resume();
+						waitingForUserGesture = false;
+					} catch (e) {
+						// Can't resume without user gesture, set flag to wait
+						if (!waitingForUserGesture) {
+							waitingForUserGesture = true;
+							console.log('Audio requires user interaction. Sound will play after first click.');
+						}
+						return;
+					}
+				}
+				if (!audioContext || audioContext.state == "suspended") {
 					return;
 				}
 				var toneEle = document.getElementById(tonename);
@@ -1581,11 +1687,18 @@
 			}
 
 			var beep = false;
+			var beepdono = false;
 			if (urlParams.has("beep")) {
 				// removes HTML from messages, donations, and names.
 				beep = true;
 				playtone();
-			}
+			} else if (urlParams.has("beepdono")) {
+				// removes HTML from messages, donations, and names.
+				beepdono = true;
+				playtone();
+			} else 
+			
+			
 
 			try {
 				if (window.location.host !== "socialstream.ninja") {
@@ -1988,139 +2101,26 @@
 				onlyshowdonos = true;
 			}
 
-			var speechLang = "en-US";
-			var speech = false;
-			var English = true;
-			var voice = false;
-			var voices = window.speechSynthesis.getVoices();
+			// TTS will be configured later using TTS.configure(urlParams)
 
 			var replaceURLInLink = true;
 			if (urlParams.has("readouturls")) {
 				replaceURLInLink = false;
 			}
 
-			var readDonos = false;
-			if (urlParams.has("ttsdonos")) {
-				readDonos = urlParams.get("ttsdonos") || "en-US";
-			}
+			// These will be handled by TTS.configure()
 			
-			var disableTTS = false;
-			if (urlParams.has("notts")) {
-				disableTTS = true;
-			}
-			
-			var newmembertts = false;
-			if (urlParams.has("ttsnewmembers")) {
-				newmembertts = urlParams.get("ttsnewmembers") || "en-US";
-			}
-			var ttsclicked = false;
-			if (urlParams.has("ttsclicked")) {
-				ttsclicked = urlParams.get("ttsclicked") || "en-US";
-			}
-			
-			if (readDonos || newmembertts || ttsclicked || urlParams.has("speech") || urlParams.has("speak") || urlParams.has("tts")) {
-				if (document.getElementById("tts")) {
-					document.getElementById("tts").dataset.state = 1;
-					document.getElementById("tts").classList.remove("hidden");
-					document.getElementById("tts").classList.add("pressed");
-				}
-				var speech = true;
-				speechLang = urlParams.get("speech") || urlParams.get("speak") || urlParams.get("tts") || readDonos || newmembertts || ttsclicked || "en-US";
-				if (speechLang.split("-")[0].toLowerCase() == "en") {
-					English = true;
-				} else {
-					English = false;
-				}
-			}
-			if (urlParams.get("language") || urlParams.get("lang") || urlParams.get("ln")) {
-				speechLang = urlParams.get("language") || urlParams.get("lang") || urlParams.get("ln");
-				if (speechLang.split("-")[0].toLowerCase() == "en") {
-					English = true;
-				} else {
-					English = false;
-				}
-			}
+			// Configure TTS with URL parameters
+			TTS.configure(urlParams);
 
-			var ttsSpeakChatname = true;
-			if (urlParams.has("simpletts2")) {
-				// You don't want to hear the chatname when TTS is enabled. ＞﹏＜
-				ttsSpeakChatname = false;
-				English = false;
-			}
-
-			if (urlParams.has("simpletts")) {
-				English = false;
-			}
 
 			var colorized = false;
 			if (urlParams.has("colorednames") || urlParams.has("color")) {
 				colorized = true;
 			}
 
-			var pitch = 1;
-			if (urlParams.has("pitch")) {
-				pitch = urlParams.get("pitch") || 1;
-				pitch = parseFloat(pitch);
-			}
 
-			var rate = 1;
-			if (urlParams.has("rate")) {
-				rate = urlParams.get("rate") || 1;
-				rate = parseFloat(rate);
-			}
-
-			var volume = 1;
-			if (urlParams.has("volume")) {
-				volume = urlParams.get("volume") || 1;
-			}
-
-			var voiceLatency = 4; // 0 slowest, but best quality; 4 is fastest, but worst quality
-			if (urlParams.has("latency")) {
-				voiceLatency = urlParams.get("latency") || 0;
-				voiceLatency = parseInt(voiceLatency) || 0;
-			}
-
-			var voiceName = false;
-			if (urlParams.has("voice")) {
-				voiceName = urlParams.get("voice") || "google";
-			}
-			
-			var voiceNameGoogle = false;
-			if (urlParams.has("voicegoogle")) {
-				voiceNameGoogle = urlParams.get("voicegoogle");
-			}
-			
-			var voiceNameElevenlabs = false;
-			if (urlParams.has("voice11")) {
-				voiceNameElevenlabs = urlParams.get("voice11");
-			}
-			
-			var voiceNameSpeechify = false;
-			if (urlParams.has("voicespeechify")) {
-				voiceNameSpeechify = urlParams.get("voicespeechify");
-			}
-
-			var voiceGender = false;
-			if (urlParams.has("gender")) {
-				voiceGender = urlParams.get("gender") || "MALE";
-			}
-			var audio = false;
-
-			var GoogleAPIKey = false; // You can get your API key from Google Cloud ; KEEP IT PRIVATE/SECRET.  It will look like: "ahasdfuyu234hjjUASDtu1234gughasdguhaU" or somnething like that.
-			var ElevenLabsKey = false;
-			var SpeechifyAPIKey = false;
-
-			if (urlParams.has("ttskey") || urlParams.has("googlettskey")) {
-				audio = document.createElement("audio");
-				GoogleAPIKey = urlParams.get("ttskey")  || urlParams.get("googlettskey") || false;
-			} else if (urlParams.has("elevenlabskey")) {
-				audio = document.createElement("audio");
-				ElevenLabsKey = urlParams.get("elevenlabskey") || false;
-			} else if (urlParams.has("speechifykey")) {
-				audio = document.createElement("audio");
-				audio.onended = finishedAudio;
-				SpeechifyAPIKey = urlParams.get("speechifykey") || false;
-			}
+			// TTS parameters are handled by TTS.configure()
 
 			function replaceURLs(node) {
 				if (node.nodeType === 3) {
@@ -2164,86 +2164,19 @@
 			}
 
 			function speak(text) {
-				if (!speech) {
-					return;
-				}
-				if (!text) {
-					return;
-				}
-				if (disableTTS){
-					return; // no exceptions.
-				}
-
+				// Handle URL replacement and beep words before passing to TTS
 				if (replaceURLInLink) {
 					text = replaceURLsWithSubstring(text, "Link");
 				}
 				
-				if (beepwords){
+				if (TTS.beepwords){
 					text = text.replace(/\*+/g, ' beep ');
 				} else {
 					text = text.replace(/\*/g, '');
 				}
-
-				if (GoogleAPIKey) {
-					googleTTS(text);
-					return;
-				} else if (ElevenLabsKey) {
-					ElevenLabsTTS(text);
-					return;
-				} else if (SpeechifyAPIKey){
-					SpeechifyTTS(text);
-					return;
-				}
-
-				if (!voice) {
-					if (!voices || !voices.length) {
-						voices = window.speechSynthesis.getVoices();
-					}
-					console.log("You can do &voice=VOICENAME to try to force select a voice based on a partial string match of its name.");
-					console.log(voices);
-					voices.forEach(vce => {
-						if (vce.name && voiceName && vce.name.toLowerCase().includes(voiceName.toLowerCase())) {
-							if (vce.lang && vce.lang.toLowerCase() == speechLang.toLowerCase()) {
-								voice = vce;
-							} else if (!voice && vce.lang && vce.lang.split("-")[0].toLowerCase() == speechLang.split("-")[0].toLowerCase()) {
-								voice = vce;
-							}
-						} else if (vce.name && vce.name.includes("Siri")) {
-							// SIRI sucks and breaks a lot, so lets skip if possible.
-							return;
-						} else if (!voice && vce.lang && vce.lang.toLowerCase() == speechLang.toLowerCase()) {
-							voice = vce;
-						} else if (!voice && vce.lang && vce.lang.split("-")[0].toLowerCase() == speechLang.split("-")[0].toLowerCase()) {
-							voice = vce;
-						}
-					});
-					if (!voice && voices.length) {
-						voice = voices.shift(); // take the first/default voice
-					}
-					if (voice) {
-						console.log("Voice being used:");
-						console.log(voice);
-						if (voice.lang && voice.lang.split("-")[0].toLowerCase() != "en") {
-							English = false;
-						}
-					} else {
-						console.log("No voice found; using lang: " + speechLang);
-					}
-				}
-
-				var speechInput = new SpeechSynthesisUtterance();
-
-				if (!voice) {
-					speechInput.lang = speechLang;
-				} else {
-					speechInput.voice = voice;
-				}
-
-				speechInput.volume = volume;
-				speechInput.rate = rate;
-				speechInput.pitch = pitch;
-				speechInput.text = text;
-				window.speechSynthesis.speak(speechInput);
+				
+				// Use the TTS module
+				TTS.speak(text);
 			}
 
 			try {
@@ -2255,177 +2188,8 @@
 				errorlog(e);
 			}
 			
-			function SpeechifyTTS(tts) {
-				//console.log(tts);
-				try {
-					const url = "https://api.sws.speechify.com/v1/audio/speech";
-					let model = English ? "simba-english" : "simba-multilingual";
-					const data = {
-						input: "<speak>" + tts + "</speak>",
-						voice_id: voiceNameSpeechify || voiceName || "henry",
-						model: model,
-						audio_format: "mp3"
-					};
-					const otherparam = {
-						method: "POST",
-						headers: {
-							"Authorization": `Bearer ${SpeechifyAPIKey}`,
-							"Content-Type": "application/json"
-						},
-						body: JSON.stringify(data)
-					};
-					fetch(url, otherparam)
-						.then(response => {
-							//console.log(response);
-							if (!response.ok) {
-								throw new Error(`HTTP error! status: ${response.status}`);
-							}
-							return response.json();
-						})
-						.then(async json => {
-							//console.log(json);
-							if (!json.audio_data) {
-								finishedAudio();
-								throw new Error("No audio data in JSON response");
-							}
-							try {
-								if (!audio) {
-									audio = document.createElement("audio");
-									audio.onended = finishedAudio;
-								}
-								audio.src = "data:audio/mp3;base64," + json.audio_data;
-								if (volume) {
-									audio.volume = volume;
-								}
-								if (audioContext.state === 'suspended') {
-									await audioContext.resume();
-								}
-								audio.play().then(() => {
-									//console.log("Audio playing successfully");
-								}).catch(err => {
-									console.error("Audio play failed, user interaction required", err);
-									finishedAudio();  // Ensure the queue is released
-								});
-							} catch (e) {
-								console.error(e);
-								finishedAudio();
-								errorlog("REMEMBER TO CLICK THE PAGE FIRST - audio won't play until you do");
-							}
-						})
-						.catch(error => {
-							finishedAudio();
-							console.error("Error with Speechify TTS:", error);
-						});
-				} catch (e) {
-					finishedAudio();
-					console.error("Error in SpeechifyTTS function:", e);
-				}
-			}
+			// TTS provider functions are now handled by tts.js
 
-			function googleTTS(tts) {
-				const url = "https://texttospeech.googleapis.com/v1beta1/text:synthesize?key=" + GoogleAPIKey;
-				var data = {
-					input: {
-						text: tts
-					},
-					voice: {
-						languageCode: speechLang.toLowerCase(),
-						name: "en-GB-Standard-A",
-						ssmlGender: "FEMALE"
-					},
-					audioConfig: {
-						audioEncoding: "MP3",
-						speakingRate: rate
-					}
-				};
-
-				if (voiceName || voiceNameGoogle) {
-					data.voice.name = voiceNameGoogle || voiceName;
-				}
-				if (voiceGender) {
-					data.voice.ssmlGender = voiceGender.toUpperCase();
-				}
-
-				const otherparam = {
-					headers: {
-						"content-type": "application/json; charset=UTF-8"
-					},
-					body: JSON.stringify(data),
-					method: "POST"
-				};
-				fetch(url, otherparam)
-					.then(data => {
-						return data.json();
-					})
-					.then(async res => {
-						//console.log(res.audioContent);
-						if (!audio) {
-							audio = document.createElement("audio");
-						}
-						audio.src = "data:audio/mp3;base64," + res.audioContent;
-						if (volume) {
-							audio.volume = volume;
-						}
-						if (audioContext.state === 'suspended') {
-							await audioContext.resume();
-						}
-						audio.play();
-					})
-					.catch(error => {
-						console.error(error);
-					});
-			}
-			function ElevenLabsTTS(tts) {
-				const voiceid = voiceNameElevenlabs || voiceName || "VR6AewLTigWG4xSOukaG";
-				const url = "https://api.elevenlabs.io/v1/text-to-speech/" + voiceid + "/stream?optimize_streaming_latency=" + voiceLatency;
-
-				var data = {
-					text: tts,
-					model_id: "eleven_multilingual_v2",
-					voice_settings: {
-						stability: 0,
-						similarity_boost: 0,
-						style: 0.5,
-						use_speaker_boost: false
-					}
-				};
-
-				const otherparam = {
-					headers: {
-						"content-type": "application/json",
-						"xi-api-key": ElevenLabsKey,
-						accept: "*/*"
-					},
-					body: JSON.stringify(data),
-					method: "POST"
-				};
-				fetch(url, otherparam)
-					.then(data => {
-						return data.blob();
-					})
-					.then(async res => {
-						const newBlob = new Blob([res]);
-						const blobUrl = window.URL.createObjectURL(newBlob);
-						if (!audio) {
-							audio = document.createElement("audio");
-						}
-						audio.src = blobUrl;
-						if (volume) {
-							audio.volume = volume;
-						}
-						if (audioContext.state === 'suspended') {
-							await audioContext.resume();
-						}
-						try {
-							audio.play();
-						} catch (e) {
-							errorlog("REMEMBER TO CLICK THE PAGE FIRST - audio won't play until you do");
-						}
-					})
-					.catch(error => {
-						console.error(error);
-					});
-			}
 
 			function RecvDataWindow() {
 				var iframe = document.createElement("iframe");
@@ -2482,7 +2246,7 @@
 
 			try {
 				var fallbackImage = new Image(); // preload it.
-				fallbackImage.src = "./sources/images/unknown.png";
+				fallbackImage.src = fallbackAvatarURL;
 				fallbackImage.onerror = function () {
 					fallbackImage = false;
 				};
@@ -2498,9 +2262,16 @@
 				if (ele.dataset.backupImage) {
 					ele.src = ele.dataset.backupImage;
 				} else if (fallbackImage) {
-					ele.src = "./sources/images/unknown.png";
+					ele.src = fallbackAvatarURL;
 				} else {
 					ele.style.display = "none";
+				}
+			}
+			
+			function handleAvatarLoad(img) {
+				// Cache the redirected URL when the image loads
+				if (img.dataset.username && img.src && img.src.includes("static-cdn.jtvnw.net")) {
+					setCachedAvatar(img.dataset.username, img.src);
 				}
 			}
 
@@ -2626,29 +2397,29 @@
 					if (data.action === "toggleTTS" || data.action === "tts") {
 						if ("value" in data){
 							if (data.value == "toggle") {
-								speech = !speech;
+								TTS.speech = !TTS.speech;
 							} else if (data.value == "true") {
-								speech = true;
+								TTS.speech = true;
 							} else if (data.value == "false") {
-								speech = false;
+								TTS.speech = false;
 							} else if (data.value == "1") {
-								speech = true;
+								TTS.speech = true;
 							} else if (data.value == "0") {
-								speech = false;
+								TTS.speech = false;
 							} else if (data.value == "on") {
-								speech = true;
+								TTS.speech = true;
 							} else if (data.value == "off") {
-								speech = false;
+								TTS.speech = false;
 							} else if (data.value) {
-								speech = true;
+								TTS.speech = true;
 							} else {
-								speech = false;
+								TTS.speech = false;
 							}
 						} else {
-							speech = !speech;
+							TTS.speech = !TTS.speech;
 						}
-						console.log("TTS: "+speech);
-						return speech
+						console.log("TTS: "+TTS.speech);
+						return TTS.speech
 					}
 				}
 				return null;
@@ -2712,6 +2483,11 @@
 					if (!data.chatimg) {
 					  data.chatimg = "";
 					}
+					// Per-message avatar override: hide avatar only if missing and URL flag set
+					let avatarForMessage = avatar;
+					if (noAvatarIfMissing && !data.chatimg && avatar) {
+					  avatarForMessage = false;
+					}
 					var showType = "";
 					
 					if (!data.type) {
@@ -2722,18 +2498,18 @@
 					}
 
 					var customSourceClass = "sourceOffset";
-					if (showType && showsource && avatar) {
+					if (showType && showsource && avatarForMessage) {
 					  showType = '<img src="./sources/images/' + showType + '.png" class="icon sourcetype" data-icon-name="' + showType + '" onerror="this.style.display=\'none\'" />';
-					} else if (showType && showsource && !avatar) {
+					} else if (showType && showsource && !avatarForMessage) {
 					  showType = '<img src="./sources/images/' + showType + '.png" class="icon sourcetype noavatar-source" data-icon-name="' + showType + '" onerror="this.style.display=\'none\'" />';
 					} else {
 					  customSourceClass = "";
 					  showType = "";
 					}
 
-					if (data.sourceImg && customSource && avatar) {
+					if (data.sourceImg && customSource && avatarForMessage) {
 					  showType += '<img src="./sources/images/' + data.sourceImg + '" class="icon sourcetype ' + customSourceClass + '"  onerror="this.style.display=\'none\'" />';
-					} else if (data.sourceImg && customSource && !avatar) {
+					} else if (data.sourceImg && customSource && !avatarForMessage) {
 					  showType += '<img src="./sources/images/' + +data.sourceImg + '" class="icon sourcetype ' + customSourceClass + ' noavatar-source" onerror="this.style.display=\'none\'" />';
 					}
 
@@ -2768,7 +2544,7 @@
 					  }
 					  data.membership = data.hasMembership.toString();
 					  
-					  if (avatar) {
+					  if (avatarForMessage) {
 						memebershipHTML = data.membership;
 					  } else {
 						// No avatar membership display
@@ -2781,7 +2557,7 @@
 						data.membership = data.membership.toString();
 					  }
 					  
-					  if (avatar) {
+					  if (avatarForMessage) {
 						if (data.subtitle) {
 						  memebershipHTML = '<div class="donation membership"><div class="donation-title">' + data.membership.toUpperCase() + "</div><div class='subtitle'>" + data.subtitle + "</div></div>";
 						} else {
@@ -2801,7 +2577,7 @@
 						}
 					  }
 					} else if (data.subtitle) {
-					  if (avatar) {
+					  if (avatarForMessage) {
 						memebershipHTML = '<div class="donation membership"><div class="subtitle">' + data.subtitle + "</div></div>";
 					  } else {
 						memebershipHTML = '<div class="no-avatar-donation single-item"><div class="subtitle">' + data.subtitle + '</div></div>';
@@ -2818,7 +2594,7 @@
 						  donationTitle = data.title;
 						}
 						
-						if (avatar) {
+						if (avatarForMessage) {
 						  donationHTML = '<div class="donation"><div class="donation-title">'+ donationTitle +'</div><div class="subtitle">' + data.hasDonation + "</div></div>";
 						} else {
 						  donationHTML = '<div class="no-avatar-donation"><div class="donation-title">'+ donationTitle +'</div><div class="subtitle">' + data.hasDonation + '</div></div>';
@@ -2829,7 +2605,7 @@
 						  donationTitle = data.title;
 						}
 						
-						if (avatar) {
+						if (avatarForMessage) {
 						  if (memebershipHTML) {
 							donationHTML = '<div class="donation">' + data.hasDonation + "</div>";
 						  } else {
@@ -2847,12 +2623,12 @@
 						  }
 						}
 					  } else if (data.title) {
-						if (avatar) {
+						if (avatarForMessage) {
 						  donationHTML = '<div class="donation"><div class="donation-title">'+ data.title +'</div><div class="subtitle">' + data.hasDonation + "</div></div>";
 						} else {
 						  donationHTML = '<div class="no-avatar-donation"><div class="donation-title">'+ data.title +'</div><div class="subtitle">' + data.hasDonation + '</div></div>';
 						}
-					  } else if (avatar) {
+					  } else if (avatarForMessage) {
 						donationHTML = '<div class="donation">' + data.hasDonation + "</div>";
 					  } else {
 						donationHTML = '<div class="no-avatar-donation single-item"><div class="subtitle">' + data.hasDonation + '</div></div>';
@@ -2899,21 +2675,21 @@
 					}
 
 					var avatarImg = "";
-					if (avatar) {
+					if (avatarForMessage) {
 					  if (data.backupChatimg) {
-						avatarImg = '<div class="hl-img" ' + styleOverrideName + '><img id="img_' + data.id + '" src="' + data.chatimg + '" class="hl-profile-pic" data-backup-image="' + data.backupChatimg + '"onerror="errorImage(this);"></div>';
+						avatarImg = '<div class="hl-img" ' + styleOverrideName + '><img id="img_' + data.id + '" src="' + data.chatimg + '" class="hl-profile-pic" data-backup-image="' + data.backupChatimg + '" data-username="' + (data.username || data.chatname || '') + '" onload="handleAvatarLoad(this);" onerror="errorImage(this);"></div>';
 					  } else {
 						let chatimg = "";
 						if (!data.chatimg){
 						  if (!data.chatname && data.event){
 							chatimg = "./icons/announcement.png";
 						  } else {
-							chatimg = "./sources/images/unknown.png";
+							chatimg = fallbackAvatarURL;
 						  }
 						} else {
 						  chatimg = data.chatimg
 						}
-						avatarImg = '<div class="hl-img" ' + styleOverrideName + '><img id="img_' + data.id + '" src="' + chatimg + '" class="hl-profile-pic" onerror="errorImage(this);"></div>';
+						avatarImg = '<div class="hl-img" ' + styleOverrideName + '><img id="img_' + data.id + '" src="' + chatimg + '" class="hl-profile-pic" data-username="' + (data.username || data.chatname || '') + '" onload="handleAvatarLoad(this);" onerror="errorImage(this);"></div>';
 					  }
 					} 
 
@@ -2937,7 +2713,7 @@
 					}
 
 					// ADD NO-AVATAR CLASS TO CONTAINER
-					var noAvatarClass = avatar ? "" : " no-avatar";
+					var noAvatarClass = avatarForMessage ? "" : " no-avatar";
 
 					if (stacking) {
 					  try {
@@ -2982,7 +2758,7 @@
 					  }
 					  
 					  // Add donation or membership HTML after the message for no-avatar mode
-					  if (!avatar && (donationHTML || memebershipHTML)) {
+					  if (!avatarForMessage && (donationHTML || memebershipHTML)) {
 						const donationWrapper = document.createElement('div');
 						donationWrapper.style.marginTop = '5px';
 						donationWrapper.innerHTML = donationHTML || memebershipHTML;
@@ -3063,16 +2839,25 @@
 					}
 
 					var username = data.username || data.chatname;
-					if ((data.type == "twitch") && avatar && username) {
+					if ((data.type == "twitch") && avatarForMessage && username) {
 					  if (!data.chatimg || data.chatimg.startsWith("https://api.socialstream.ninja")){
-						var twitchImage = new Image();
-						data.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(username);
-						twitchImage.onload = function () {
+						// Check cache first
+						const cachedUrl = getCachedAvatar(username);
+						if (cachedUrl) {
+						  data.chatimg = cachedUrl;
 						  try {
 							document.getElementById("img_" + data.id).src = data.chatimg;
 						  } catch (e) {}
-						}.bind(data);
-						twitchImage.src = data.chatimg;
+						} else {
+						  var twitchImage = new Image();
+						  data.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(username);
+						  twitchImage.onload = function () {
+							try {
+							  document.getElementById("img_" + data.id).src = data.chatimg;
+							} catch (e) {}
+						  }.bind(data);
+						  twitchImage.src = data.chatimg;
+						}
 					  }
 					}
 
@@ -3111,7 +2896,12 @@
 					}
 					document.getElementById("output").classList.remove(transitionType);
 
-					if (speech) {
+					// Handle TTS if enabled
+					if (TTS.speech) {
+					  TTS.speechMeta(data);
+					}
+					
+					/*if (TTS.speech) {
 					  var msgPlain = document.getElementById("message");
 					  if (msgPlain) {
 						msgPlain = (msgPlain.textContent || msgPlain.innerText || "")
@@ -3126,14 +2916,14 @@
 					  }
 
 					  var chatname = "";
-					  if (data.chatname && ttsSpeakChatname) {
+					  if (data.chatname && TTS.ttsSpeakChatname) {
 						chatname = data.chatname.toLowerCase().replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF])/g, "");
 						chatname = chatname.replaceAll("_", " ");
 						chatname = chatname.replaceAll("@", " ");
 						chatname = chatname.replaceAll("!", " ");
 					  }
 
-					  if (data.hasDonation && (!(newmembertts || ttsclicked) || readDonos)) {
+					  if (data.hasDonation && TTS.readDonos) {
 						var donoText = document.createElement("div");
 						donoText.innerHTML = data.hasDonation;
 						donoText = donoText.innerText.trim();
@@ -3143,7 +2933,7 @@
 						donoText = donoText.replaceAll("!", " ");
 
 						if (chatname) {
-						  if (English) {
+						  if (TTS.English) {
 							if (msgPlain) {
 							  speak(chatname + " has donated " + donoText + " and says " + msgPlain);
 							} else {
@@ -3154,7 +2944,7 @@
 						  } else {
 							speak(chatname + "! ! .. " + donoText);
 						  }
-						} else if (English) {
+						} else if (TTS.English) {
 						  if (msgPlain) {
 							speak("Someone has donated " + donoText + " and says " + msgPlain);
 						  } else {
@@ -3165,32 +2955,32 @@
 						} else {
 						  speak(donoText);
 						}
-					  } else if (msgPlain && newmembertts && data.event && (data.event == "newmember")){
+					  } else if (msgPlain && data.event && (data.event == "newmember")){
 						if (chatname) {
-						  if (English) {
+						  if (TTS.English) {
 							speak(chatname + " says! " + msgPlain);
 						  } else {
 							speak(chatname + "! ! .. " + msgPlain);
 						  }
-						} else if (English) {
+						} else if (TTS.English) {
 						  speak("Someone says! " + msgPlain);
 						} else {
 						  speak(msgPlain);
 						}
-					  } else if (msgPlain && ((!readDonos && !newmembertts && !ttsclicked) || (ttsclicked && data.clicked))) {
+					  } else if (msgPlain && !TTS.readDonos) {
 						if (chatname) {
-						  if (English) {
+						  if (TTS.English) {
 							speak(chatname + " says! " + msgPlain);
 						  } else {
 							speak(chatname + "! ! .. " + msgPlain);
 						  }
-						} else if (English) {
+						} else if (TTS.English) {
 						  speak("Someone says! " + msgPlain);
 						} else {
 						  speak(msgPlain);
 						}
 					  }
-					}
+					}*/
 
 					if (timeoutDelay) {
 					  timeoutTimer = setTimeout(function () {
@@ -3208,7 +2998,9 @@
 				sendToDisk(contents);
 
 				if (beep) {
-				  playtone();
+				    playtone();
+				} else if (beepdono && contents.hasDonation){
+					playtone();
 				}
 
 				if (newImageHandle && contents && contents.chatimg) {
@@ -3218,7 +3010,13 @@
 				  }
 				  if (contents.type && (contents.type == "twitch") && contents.chatname) {
 					if (!contents.chatimg  || contents.chatimg.startsWith("https://api.socialstream.ninja")){
-					  contents.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(contents.chatname);
+					  // Check cache first
+					  const cachedUrl = getCachedAvatar(contents.chatname);
+					  if (cachedUrl) {
+						contents.chatimg = cachedUrl;
+					  } else {
+						contents.chatimg = "https://api.socialstream.ninja/twitch/large?username=" + encodeURIComponent(contents.chatname);
+					  }
 					}
 				  }
 				  overwriteImage(contents.chatimg);
@@ -3247,6 +3045,39 @@
 				};
 				document.head.appendChild(externalJavaascript);
 			}*/
+			
+			// Clean up audio context when page unloads
+			window.addEventListener('beforeunload', function() {
+				if (audioContext && audioContext.state !== 'closed') {
+					audioContext.close();
+				}
+			});
+			
+			// Resume audio context on user interaction if needed
+			function setupUserInteractionHandler() {
+				const handler = function() {
+					if (audioContext && audioContext.state === 'suspended') {
+						audioContext.resume().then(() => {
+							waitingForUserGesture = false;
+							console.log('Audio context resumed after user interaction');
+						});
+					}
+					document.removeEventListener('click', handler);
+					document.removeEventListener('touchstart', handler);
+					document.removeEventListener('keydown', handler);
+				};
+				
+				document.addEventListener('click', handler);
+				document.addEventListener('touchstart', handler);
+				document.addEventListener('keydown', handler);
+			}
+			
+			// Set up user interaction handlers
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', setupUserInteractionHandler);
+			} else {
+				setupUserInteractionHandler();
+			}
 		</script>
 	</body>
 </html>

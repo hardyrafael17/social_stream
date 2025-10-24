@@ -15,6 +15,25 @@
 			}
 		}
 	} catch(e){}
+	
+	var channelName = "";
+	var channelThumbnail = "";
+	
+	const getChannelInfo = async (videoId) => {
+		const response = await fetch(`https://api.socialstream.ninja/youtube/channel_info?video=${videoId}`);
+		const data = await response.json();
+
+		if (data.error) {
+		  throw new Error(data.error);
+		}
+		
+		channelName = data.channelName,
+		channelThumbnail =  data.channelThumbnail
+	};
+	
+	if (videoId){
+		setTimeout(function(videoId){getChannelInfo(videoId)},1000,videoId);
+	}
 
  	function getTranslation(key, value = false) {
 		if (settings.translation && settings.translation.innerHTML && key in settings.translation.innerHTML) {
@@ -593,7 +612,7 @@
 			} catch (e) {}
 		}
 
-		var chatbadges = [];
+		var chatbadges = [];  
 		try {
 			ele.querySelectorAll(".yt-live-chat-author-badge-renderer img, .yt-live-chat-author-badge-renderer svg").forEach(img => {
 				if (img.tagName.toLowerCase() == "img") {
@@ -616,6 +635,27 @@
 					chatbadges.push(html);
 				}
 			});
+			
+			ele.querySelectorAll(".yt-spec-button-shape-next--icon-leading[aria-label]").forEach(img => {
+			try {
+				if (img.ariaLabel.startsWith("Like")){return;}
+				if (img.ariaLabel.startsWith("Reply")){return;}
+				var html = {};
+				html.html = `
+					<svg xmlns="http://www.w3.org/2000/svg" width="28" height="16" viewBox="0 0 28 16" fill="rgb(54, 0, 140)" stroke="rgb(255,255,255)" focusable="false" aria-hidden="true" style="width: 100%; height: 100%; background-color:rgb(54, 0, 140); border-radius:3px; margin:0 2px;">
+					  <g fill="rgb(54, 0, 140)" stroke="rgb(255, 255, 255)">
+						<path clip-rule="evenodd" d="M4.5 6 8 2l3.5 4L15 3.5V14H1V3.5L4.5 6ZM2 12v1h12v-1H2Zm12-1H2V5.443L4.656 7.34 8 3.52l3.344 3.821L14 5.443V11Z" fill-rule="evenodd"></path>
+					  </g>
+					  <text x="17" y="12" font-family="Arial, sans-serif" font-size="10" font-weight="lighter" fill="rgb(255,255,255)">${img.ariaLabel}</text>
+					</svg>
+				`;
+				html.type = "svg";
+				chatbadges.push(html);
+			} catch(e) {
+				// Handle error
+			}
+		});
+			
 		} catch (e) {}
 
 		var hasDonation = "";
@@ -687,6 +727,12 @@
 				try {
 					const headerSubtext = ele.querySelector("#header-subtext");
 					const headerText = ele.querySelector("#header-primary-text");
+					
+					// Check if this is specifically a new member welcome (has subtext but no message content)
+					const hasEmptyMessage = !ele.querySelector("#message")?.textContent?.trim();
+					const isNewMemberStructure = headerSubtext && hasEmptyMessage && 
+					                            ele.hasAttribute("show-only-header") && 
+					                            ele.hasAttribute("modern");
 
 					if (headerSubtext) {
 						const subtextContent = getAllContentNodes(headerSubtext);
@@ -699,11 +745,23 @@
 							if (tierMatch && tierMatch[1]) {
 								subtitle = tierMatch[1].trim();
 							}
-						} else if (subtextContent.toLowerCase().includes("welcome to")) {
+						} else if (subtextContent.toLowerCase().includes("welcome to") || subtextContent.toLowerCase().includes("willkommen bei")) {
 							chatmessage = subtextContent;
 							hasMembership = getTranslation("member-chat", "MEMBERSHIP");
 							eventType = "new-membership";
-							const tierMatch = subtextContent.match(/welcome to\s+(.+?)(?:\s*!)?$/i);
+							// Updated regex to handle both English and German patterns
+							const tierMatch = subtextContent.match(/(?:welcome to|willkommen bei)\s+(.+?)(?:\s*!)?$/i);
+							if (tierMatch && tierMatch[1]) {
+								subtitle = tierMatch[1].trim();
+							}
+						} else if (isNewMemberStructure && subtextContent) {
+							// Structure-based detection for new members in any language
+							// Only triggers for membership items with the specific structure
+							chatmessage = subtextContent;
+							hasMembership = getTranslation("member-chat", "MEMBERSHIP");
+							eventType = "new-membership";
+							// Try to extract channel/tier name - look for text after common prepositions
+							const tierMatch = subtextContent.match(/(?:to|bei|à|a|para|для|へ|に|에|у|na|في|में)\s+(.+?)(?:\s*[!.。！])?$/i);
 							if (tierMatch && tierMatch[1]) {
 								subtitle = tierMatch[1].trim();
 							}
@@ -744,6 +802,8 @@
 			eventType = "sponsorship";
 			chatmessage = getAllContentNodes(giftedmemembership);
 			hasMembership = getTranslation("sponsorship", "SPONSORSHIP");
+		} else if (!chatmessage && chatmembership) {
+			chatmessage = chatmembership;
 		} else if (chatmessage && eventType === "jeweldonation") {
 			try {
 				const jewelMatch = chatmessage.match(/sent\s+(.*?)\s+for\s+([0-9,]+)\s+Jewels/i);
@@ -880,6 +940,13 @@
 		data.textonly = settings.textonlymode || false;
 		data.type = "youtube"; 
 		
+		if (channelName){
+			data.sourceName = channelName;
+		}
+		if (channelThumbnail){
+			data.sourceImg = channelThumbnail;
+		}
+		
 		if (youtubeShorts){
 			data.type = "youtubeshorts";
 		}
@@ -968,6 +1035,12 @@
 						captureDelay = 200;
 						//console.log(captureDelay);
 					}
+					// Apply or remove larger font when settings change
+					if (settings.youtubeLargerFont) {
+						applyLargerFont();
+					} else {
+						removeLargerFont();
+					}
 					return;
 				}
 				if ("SEVENTV" in request) {
@@ -1040,7 +1113,7 @@
 		
 		if ("settings" in response) {
 			settings = response.settings;
-			
+
 			if (settings.bttv && !BTTV) {
 				chrome.runtime.sendMessage(chrome.runtime.id, { getBTTV: true }, function (response) {
 					//	console.log(response);
@@ -1056,13 +1129,18 @@
 					//	console.log(response);
 				});
 			}
-			
+
 			if (settings.delayyoutube){
 				captureDelay = 2000;
 				//console.log(captureDelay);
 			} else {
 				captureDelay = 200;
 				//console.log(captureDelay);
+			}
+
+			// Apply larger font if enabled on startup
+			if (settings.youtubeLargerFont) {
+				applyLargerFont();
 			}
 		}
 	});
@@ -1125,7 +1203,32 @@
 
 	console.log("Social stream inserted");
 	var marked = false;
-	
+	var largerFontApplied = false;
+
+	function applyLargerFont() {
+		if (!largerFontApplied) {
+			var style = document.createElement("style");
+			style.id = "youtube-larger-font-style";
+			style.innerHTML = `
+				yt-live-chat-text-message-renderer {
+					font-size: 24px !important;
+				}
+			`;
+			document.head.appendChild(style);
+			largerFontApplied = true;
+		}
+	}
+
+	function removeLargerFont() {
+		if (largerFontApplied) {
+			var styleElement = document.getElementById("youtube-larger-font-style");
+			if (styleElement) {
+				styleElement.remove();
+			}
+			largerFontApplied = false;
+		}
+	}
+
 	const checkTimer = setInterval(function () {
 	  let ele = document.querySelector("yt-live-chat-app #items.yt-live-chat-item-list-renderer");
 	  
@@ -1228,6 +1331,13 @@
 		  document.querySelector("yt-live-chat-header-renderer").style.maxHeight = "unset";
 		  marked = false;
 	  }
+
+	  // Apply or remove larger font based on settings
+	  if (settings.youtubeLargerFont) {
+		  applyLargerFont();
+	  } else {
+		  removeLargerFont();
+	  }
 	}, 1000);
 
 	
@@ -1271,7 +1381,7 @@
 								if (viewerCheckInterval) {
 									clearInterval(viewerCheckInterval);
 								}
-								viewerCheckInterval = setInterval(function(){checkViewers()}, 120000); // 2 minutes
+								viewerCheckInterval = setInterval(function(){checkViewers()}, 118000); // 1:58 seconds
 							}
 							// Fallback to scraping the YouTube page
 							return fetchViewerCountFromPage(videoId);
@@ -1318,7 +1428,7 @@
 					if (viewerCheckInterval) {
 						clearInterval(viewerCheckInterval);
 					}
-					viewerCheckInterval = setInterval(function(){checkViewers()}, 120000); // 2 minutes
+					viewerCheckInterval = setInterval(function(){checkViewers()}, 118000); // 1:58 minutes
 				}
 				// Try fallback method on any error
 				fetchViewerCountFromPage(videoId);
@@ -1330,45 +1440,58 @@
 		return fetch('https://www.youtube.com/watch?v=' + videoId)
 			.then(response => response.text())
 			.then(html => {
+				let viewerCount = 0; // Default to 0 if not found
 				try {
 					// Look for the pattern in the HTML - matches any number in originalViewCount
 					const viewerMatch = html.match(/"isLive"\s*:\s*true\s*,\s*"originalViewCount"\s*:\s*"(\d+)"/);
-					
+
 					if (viewerMatch && viewerMatch[1]) {
-						const viewerCount = parseInt(viewerMatch[1]);
-						
+						const parsedCount = parseInt(viewerMatch[1]);
+
 						// Validate the viewer count is reasonable
-						if (!isNaN(viewerCount) && viewerCount >= 0 && viewerCount < 1000000000) {
+						if (!isNaN(parsedCount) && parsedCount >= 0 && parsedCount < 1000000000) {
+							viewerCount = parsedCount;
 							console.log("Successfully scraped viewer count:", viewerCount);
-							
-							// Send the viewer count update
-							chrome.runtime.sendMessage(
-								chrome.runtime.id,
-								({message:{
-										type: (youtubeShorts ? "youtubeshorts" : "youtube"),
-										event: 'viewer_update',
-										meta: viewerCount
-									}
-								}),
-								function (e) {}
-							);
-							
-							return { viewers: viewerCount };
 						} else {
-							console.log("Invalid viewer count scraped:", viewerCount);
+							console.log("Invalid viewer count scraped:", parsedCount);
 						}
 					} else {
-						console.log("Could not find viewer count in page HTML");
+						console.log("Could not find viewer count in page HTML, defaulting to 0");
 					}
 				} catch (e) {
 					console.error("Error parsing viewer count from page:", e);
 				}
-				
-				return null;
+
+				// Always send the viewer count update (even if 0)
+				chrome.runtime.sendMessage(
+					chrome.runtime.id,
+					({message:{
+							type: (youtubeShorts ? "youtubeshorts" : "youtube"),
+							event: 'viewer_update',
+							meta: viewerCount
+						}
+					}),
+					function (e) {}
+				);
+
+				return { viewers: viewerCount };
 			})
 			.catch(error => {
 				console.error("Error fetching YouTube page for viewer count:", error);
-				return null;
+
+				// Send 0 on fetch error to clear stale counts
+				chrome.runtime.sendMessage(
+					chrome.runtime.id,
+					({message:{
+							type: (youtubeShorts ? "youtubeshorts" : "youtube"),
+							event: 'viewer_update',
+							meta: 0
+						}
+					}),
+					function (e) {}
+				);
+
+				return { viewers: 0 };
 			});
 	}
 	

@@ -3,7 +3,7 @@
 	console.log("Social stream injected");
 	const avatarCache = {
 		_cache: {},
-		MAX_SIZE: 500,
+		MAX_SIZE: 501,
 		CLEANUP_COUNT: 50,
 		add(chatname, chatimg, badges = null, membership = null, nameColor = null) {
 			if (!chatname) return;
@@ -36,27 +36,41 @@
 		}
 	};
 	const messageLog = {
-		_log: [],
+		_entries: new Map(),
+		_order: [],
 		_mode: 'count',
-		_maxMessages: 400,
-		_timeWindow: 10000,
+		_maxMessages: 501,
+		_timeWindow: null,
 		_cleanupInterval: null,
 		init(options = {}) {
 			this._mode = options.mode || 'count';
-			this._maxMessages = options.maxMessages || 400;
-			this._timeWindow = options.timeWindow || 10000;
+			this._maxMessages = options.maxMessages || 501;
+			this._timeWindow = Number.isFinite(options.timeWindow) ? options.timeWindow : null;
 			this.destroy();
 			this._cleanupInterval = setInterval(() => this.cleanup(), 5000);
 		},
 		cleanup() {
 			const currentTime = Date.now();
-			if (this._mode === 'time') {
-				this._log = this._log.filter(entry =>
-					(currentTime - entry.time) <= this._timeWindow
-				);
-			} else {
-				if (this._log.length > this._maxMessages) {
-					this._log = this._log.slice(-this._maxMessages);
+			if (this._mode === 'time' || (this._timeWindow && this._mode !== 'count')) {
+				while (this._order.length) {
+					const key = this._order[0];
+					const entry = this._entries.get(key);
+					if (!entry) {
+						this._order.shift();
+						continue;
+					}
+					if (!this._timeWindow || (currentTime - entry.time) <= this._timeWindow) {
+						break;
+					}
+					this._entries.delete(key);
+					this._order.shift();
+				}
+			}
+			if (this._maxMessages && this._entries.size > this._maxMessages) {
+				const overflow = this._entries.size - this._maxMessages;
+				for (let i = 0; i < overflow && this._order.length; i++) {
+					const key = this._order.shift();
+					this._entries.delete(key);
 				}
 			}
 		},
@@ -64,26 +78,28 @@
 			if (!name && !message) return true;
 			const currentTime = Date.now();
 			const messageKey = `${name}:${message}`;
-			let duplicate = false;
-			if (this._mode === 'time') {
-				duplicate = this._log.some(entry =>
-					entry.key === messageKey &&
-					(currentTime - entry.time) <= this._timeWindow
-				);
-			} else {
-				duplicate = this._log.some(entry =>
-					entry.key === messageKey
-				);
+			const existing = this._entries.get(messageKey);
+			if (existing) {
+				if (!this._timeWindow || (currentTime - existing.time) <= this._timeWindow) {
+					return true;
+				}
+				// The message is older than the window; drop the stale entry before continuing.
+				this._entries.delete(messageKey);
+				const index = this._order.indexOf(messageKey);
+				if (index !== -1) {
+					this._order.splice(index, 1);
+				}
 			}
-			if (duplicate) {
-				return true;
-			}
-			this._log.push({
-				key: messageKey,
-				time: currentTime
-			});
-			if (this._mode === 'count' && this._log.length > this._maxMessages) {
-				this._log = this._log.slice(-this._maxMessages);
+			this._entries.set(messageKey, { time: currentTime });
+			this._order.push(messageKey);
+			if (this._timeWindow && this._mode === 'time') {
+				this.cleanup();
+			} else if (this._entries.size > this._maxMessages) {
+				const overflow = this._entries.size - this._maxMessages;
+				for (let i = 0; i < overflow && this._order.length; i++) {
+					const key = this._order.shift();
+					this._entries.delete(key);
+				}
 			}
 			return false;
 		},
@@ -92,26 +108,37 @@
 				clearInterval(this._cleanupInterval);
 				this._cleanupInterval = null;
 			}
-			this._log = [];
+			this._entries.clear();
+			this._order = [];
 		},
 		configure(options = {}) {
 			if (options.mode !== undefined) this._mode = options.mode;
 			if (options.maxMessages !== undefined) this._maxMessages = options.maxMessages;
-			if (options.timeWindow !== undefined) this._timeWindow = options.timeWindow;
+			if (options.timeWindow !== undefined) {
+				this._timeWindow = Number.isFinite(options.timeWindow) ? options.timeWindow : null;
+			}
 			this.cleanup();
 		}
 	};
 	messageLog.init({
 		mode: 'count',
-		maxMessages: 421
+		maxMessages: 501
 	});
 
 	function pushMessage(data) {
 		try {
 			chrome.runtime.sendMessage(chrome.runtime.id, {
 				"message": data
-			}, function(e) {});
-		} catch (e) {}
+			}, function(e) {
+				// Check for chrome runtime errors
+				if (chrome.runtime.lastError) {
+					console.error("[TikTok] Chrome runtime error:", chrome.runtime.lastError.message);
+					// Could indicate extension was reloaded or connection lost
+				}
+			});
+		} catch (e) {
+			console.error("[TikTok] Failed to send message:", e);
+		}
 	}
 
 	function getTranslation(key, value = false) {
@@ -161,11 +188,13 @@
 		}
 	}
 
-	function getAllContentNodes(element) {
+	function getAllContentNodes(element, old=false) {
 		var resp = "";
 		if (!element) {
 			return resp;
 		}
+		if (old && element.dataset && element.dataset.skip){return "";}
+		
 		if (!element.children || !element.children.length) {
 			if (element.textContent) {
 				return escapeHtml(element.textContent) || "";
@@ -175,14 +204,16 @@
 		}
 		let isBadge = false;
 		element.childNodes.forEach(node => {
+			
 			if (node.childNodes.length) {
-				resp += getAllContentNodes(node).trim() + " ";
+				resp += getAllContentNodes(node, true).trim() + " ";
 			} else if ((node.nodeType === 3) && node.textContent) {
+				if (node && node.dataset && node.dataset.skip){return;}
 				resp += escapeHtml(node.textContent);
 			} else if (node.nodeType === 1) {
 				if (!settings.textonlymode) {
 					if ((node.nodeName == "IMG") && node.src) {
-						if (node.skip || node.src.includes("_badge_")) {
+						if ((node.dataset && node.dataset.skip) || node.src.includes("_badge_")) {
 							isBadge = true;
 							return;
 						}
@@ -253,12 +284,14 @@
 		const nodes = Array.from(tempDiv.childNodes);
 		const word = nodes[0].textContent.trim();
 		const imageSrc = nodes[1].getAttribute('src');
-		const quantity = parseInt(nodes[2].textContent.slice(1), 10);
+		// Extract numeric quantity robustly (supports 'x5', '×5', '× 5')
+		const trailingText = nodes[2].textContent.trim();
+		const quantity = parseInt(trailingText.replace(/[^0-9]/g, ''), 10);
 		return {
 			word,
 			imageSrc,
 			quantity,
-			isValid: true
+			isValid: Number.isFinite(quantity)
 		};
 	}
 
@@ -273,331 +306,384 @@
 		const imgSrc = imgElement.getAttribute('src');
 		if (!imgSrc || !imgSrc.includes('tiktokcdn.com')) return false;
 		const lastText = nodes[2].textContent.trim();
-		const xNumberPattern = /^x\d+$/;
-		if (!xNumberPattern.test(lastText)) return false;
+		const indicatorPattern = /^[x×]\s*\d+$/i; // support 'x5' or '× 5'
+		if (!indicatorPattern.test(lastText)) return false;
 		return true;
 	}
-	let giftMapping = {
-		"485175fda92f4d2f862e915cbcf8f5c4": {
-			"name": "Star",
-			"coins": 99
-		},
-		"eba3a9bb85c33e017f3648eaf88d7189": {
-			"name": "Rose",
-			"coins": 1
-		},
-		"ab0a7b44bfc140923bb74164f6f880ab": {
-			"name": "Love you",
-			"coins": 1
-		},
-		"6cd022271dc4669d182cad856384870f": {
-			"name": "Hand Hearts",
-			"coins": 100
-		},
-		"4e7ad6bdf0a1d860c538f38026d4e812": {
-			"name": "Doughnut",
-			"coins": 30
-		},
-		"a4c4dc437fd3a6632aba149769491f49": {
-			"name": "Finger Heart",
-			"coins": 5
-		},
-		"0f158a08f7886189cdabf496e8a07c21": {
-			"name": "Paper Crane",
-			"coins": 99
-		},
-		"d72381e125ad0c1ed70f6ef2aff6c8bc": {
-			"name": "Little Ghost",
-			"coins": 10
-		},
-		"e45927083072ffe0015253d11e11a3b3": {
-			"name": "Pho",
-			"coins": 10
-		},
-		"c2413f87d3d27ac0a616ac99ccaa9278": {
-			"name": "Spooky Cat",
-			"coins": 1200
-		},
-		"1bdf0b38142a94af0f71ea53da82a3b1": {
-			"name": "Bouquet",
-			"coins": 100
-		},
-		"802a21ae29f9fae5abe3693de9f874bd": {
-			"name": "TikTok",
-			"coins": 1
-		},
-		"3ac5ec732f6f4ba7b1492248bfea83d6": {
-			"name": "Birthday Cake",
-			"coins": 1
-		},
-		"148eef0884fdb12058d1c6897d1e02b9": {
-			"name": "Corgi",
-			"coins": 299
-		},
-		"c836c81cc6e899fe392a3d11f69fafa3": {
-			"name": "Boo's Town",
-			"coins": 15000
-		},
-		"d53125bd5416e6f2f6ab61da02ddd302": {
-			"name": "Lucky Pig",
-			"coins": 10
-		},
-		"e0589e95a2b41970f0f30f6202f5fce6": {
-			"name": "Money Gun",
-			"coins": 500
-		},
-		"c2cd98b5d3147b983fcbf35d6dd38e36": {
-			"name": "Balloon Gift Box",
-			"coins": 100
-		},
-		"79a02148079526539f7599150da9fd28": {
-			"name": "Galaxy",
-			"coins": 1000
-		},
-		"863e7947bc793f694acbe970d70440a1": {
-			"name": "Forever Rosa",
-			"coins": 399
-		},
-		"968820bc85e274713c795a6aef3f7c67": {
-			"name": "Ice Cream Cone",
-			"coins": 1
-		},
-		"d244d4810758c3227e46074676e33ec8": {
-			"name": "Trick or Treat",
-			"coins": 299
-		},
-		"c9734b74f0e4e79bdfa2ef07c393d8ee": {
-			"name": "Pumpkin",
-			"coins": 1
-		},
-		"eb77ead5c3abb6da6034d3cf6cfeb438": {
-			"name": "Rosa",
-			"coins": 10
-		},
-		"ff861a220649506452e3dc35c58266ea": {
-			"name": "Peach",
-			"coins": 5
-		},
-		"30063f6bc45aecc575c49ff3dbc33831": {
-			"name": "Star Throne",
-			"coins": 7999
-		},
-		"cb909c78f2412e4927ea68d6af8e048f": {
-			"name": "Boo the Ghost",
-			"coins": 88
-		},
-		"20b8f61246c7b6032777bb81bf4ee055": {
-			"name": "Perfume",
-			"coins": 20
-		},
-		"0573114db41d2cf9c7dd70c8b0fab38e": {
-			"name": "Okay",
-			"coins": 5
-		},
-		"312f721603de550519983ca22f5cc445": {
-			"name": "Shamrock",
-			"coins": 10
-		},
-		"a40b91f7a11d4cbce780989e2d20a1f4": {
-			"name": "Ice cream",
-			"coins": 5
-		},
-		"2db38e8f2a9fb804cb7d3bd2a0ba635c": {
-			"name": "Love Balloon",
-			"coins": 500
-		},
-		"3f02fa9594bd1495ff4e8aa5ae265eef": {
-			"name": "GG",
-			"coins": 1
-		},
-		"0183cfcfc0dac56580cdc43956b73bfe": {
-			"name": "Gimme The Vote",
-			"coins": 1
-		},
-		"3c5e5fc699ed9bee71e79cc90bc5ab37": {
-			"name": "Drip Brewing",
-			"coins": 10
-		},
-		"43e1dee87ec71c57ab578cb861bbd749": {
-			"name": "Music Play",
-			"coins": 1
-		},
-		"b48c69f4df49c28391bcc069bbc31b41": {
-			"name": "You're Amazing",
-			"coins": 500
-		},
-		"e033c3f28632e233bebac1668ff66a2f": {
-			"name": "Friendship Necklace",
-			"coins": 10
-		},
-		"cb4e11b3834e149f08e1cdcc93870b26": {
-			"name": "Confetti",
-			"coins": 100
-		},
-		"909e256029f1649a9e7e339ef71c6896": {
-			"name": "Potato",
-			"coins": 5
-		},
-		"d4faa402c32bf4f92bee654b2663d9f1": {
-			"name": "Coral",
-			"coins": 499
-		},
-		"97a26919dbf6afe262c97e22a83f4bf1": {
-			"name": "Swan",
-			"coins": 699
-		},
-		"a03bf81f5759ed3ffb048e1ca71b2b5e": {
-			"name": "Good Night",
-			"coins": 10
-		},
-		"01d07ef5d45eeedce64482be2ee10a74": {
-			"name": "Dumplings",
-			"coins": 10
-		},
-		"90a405cf917cce27a8261739ecd84b89": {
-			"name": "Phoenix Flower",
-			"coins": 5
-		},
-		"2c9cec686b98281f7319b1a02ba2864a": {
-			"name": "Lock and Key",
-			"coins": 199
-		},
-		"d990849e0435271bc1e66397ab1dec35": {
-			"name": "Singing Mic",
-			"coins": 399
-		},
-		"0115cb20f6629dc50d39f6b747bddf73": {
-			"name": "Wedding",
-			"coins": 1500
-		},
-		"96d9226ef1c33784a24d0779ad3029d3": {
-			"name": "Glowing Jellyfish",
-			"coins": 1000
-		},
-		"af980f4ec9ed73f3229df8dfb583abe6": {
-			"name": "Future Encounter",
-			"coins": 1500
-		},
-		"4227ed71f2c494b554f9cbe2147d4899": {
-			"name": "Train",
-			"coins": 899
-		},
-		"1d1650cd9bb0e39d72a6e759525ffe59": {
-			"name": "Watermelon Love",
-			"coins": 1000
-		},
-		"ed2cc456ab1a8619c5093eb8cfd3d303": {
-			"name": "Sage the Smart Bean",
-			"coins": 399
-		},
-		"9494c8a0bc5c03521ef65368e59cc2b8": {
-			"name": "Fireworks",
-			"coins": 1088
-		},
-		"3cbaea405cc61e8eaab6f5a14d127511": {
-			"name": "Rosie the Rose Bean",
-			"coins": 399
-		},
-		"767d7ea90f58f3676bbc5b1ae3c9851d": {
-			"name": "Rocky the Rock Bean",
-			"coins": 399
-		},
-		"9f8bd92363c400c284179f6719b6ba9c": {
-			"name": "Boxing Gloves",
-			"coins": 299
-		},
-		"f76750ab58ee30fc022c9e4e11d25c9d": {
-			"name": "Blooming Ribbons",
-			"coins": 1000
-		},
-		"0e3769575f5b7b27b67c6330376961a4": {
-			"name": "Jollie the Joy Bean",
-			"coins": 399
-		},
-		"1153dd51308c556cb4fcc48c7d62209f": {
-			"name": "Fruit Friends",
-			"coins": 299
-		},
-		"fa6bd8486df33dbe732381fa5c6cf441": {
-			"name": "Lovely Music",
-			"coins": 999
-		},
-		"af67b28480c552fd8e8c0ae088d07a1d": {
-			"name": "Under Control",
-			"coins": 1500
-		},
-		"71883933511237f7eaa1bf8cd12ed575": {
-			"name": "Meteor Shower",
-			"coins": 3000
-		},
-		"6517b8f2f76dc75ff0f4f73107f8780e": {
-			"name": "Motorcycle",
-			"coins": 2988
-		},
-		"3f1945b0d96e665a759f747e5e0cf7a9": {
-			"name": "Cooper Flies Home",
-			"coins": 1999
-		},
-		"1ea8dbb805466c4ced19f29e9590040f": {
-			"name": "Chasing the Dream",
-			"coins": 1500
-		},
-		"1420cc77d628c49516b9330095101496": {
-			"name": "Love Explosion",
-			"coins": 1500
-		},
-		"5d456e52403cefb87d6d78c9cabb03db": {
-			"name": "The Running 9",
-			"coins": 1399
-		},
-		"6b103f9ea6c313b8df68be92e54202cc": {
-			"name": "Shaking Drum",
-			"coins": 2500
-		},
-		"e7ce188da898772f18aaffe49a7bd7db": {
-			"name": "Sports Car",
-			"coins": 7000
-		},
-		"1d067d13988e8754ed6adbebd89b9ee8": {
-			"name": "Flying Jets",
-			"coins": 5000
-		},
-		"f334260276d5fa0de91c5fb61e26d07d": {
-			"name": "Lantern Road",
-			"coins": 5000
-		},
-		"921c6084acaa2339792052058cbd3fd3": {
-			"name": "Private Jet",
-			"coins": 4888
-		},
-		"universe": {
-			"name": "Universe",
-			"coins": 34999
-		},
-		"lion": {
-			"name": "Lion",
-			"coins": 29999
-		},
-		"drama-king": {
-			"name": "Drama King",
-			"coins": 49999
-		},
-		"donut-tower": {
-			"name": "Donut Tower",
-			"coins": 4999
-		},
-		"diamond-crown": {
-			"name": "Diamond Crown",
-			"coins": 5999
-		},
-		"tiktok-crown": {
-			"name": "TikTok Crown",
-			"coins": 8999
-		},
-		"fans_starter_upgraded_gift": {
-			"name": "upgraded gift"
-		}
-	}
+		let giftMapping = {
+	  "eba3a9bb85c33e017f3648eaf88d7189": {
+		"name": "Rose",
+		"coins": 1
+	  },
+	  "cb1c3e6263d4b6c08301f8798dcb5a9b": {
+		"name": "Tsar",
+		"coins": 100
+	  },
+	  "3f02fa9594bd1495ff4e8aa5ae265eef": {
+		"name": "GG",
+		"coins": 1
+	  },
+	  "20ec0eb50d82c2c445cb8391fd9fe6e2": {
+		"name": "Game Controller",
+		"coins": 100
+	  },
+	  "b199d028d5beb081fe16edcf77db0830": {
+		"name": "Flame heart",
+		"coins": 1
+	  },
+	  "a4c4dc437fd3a6632aba149769491f49": {
+		"name": "Finger heart",
+		"coins": 5
+	  },
+	  "7ee91414ca66477969b8d30831d8e5c1": {
+		"name": "LIVE STAR",
+		"coins": 1
+	  },
+	  "d9119ea9e40e68f770e8273ca0372c7e": {
+		"name": "New LIVE Star",
+		"coins": 5
+	  },
+	  "621c62c208eeaeba85761c0c5efdd32b": {
+		"name": "Elite LIVE Star",
+		"coins": 30
+	  },
+	  "eb77ead5c3abb6da6034d3cf6cfeb438": {
+		"name": "Rosa",
+		"coins": 10
+	  },
+	  "fc549cf1bc61f9c8a1c97ebab68dced7": {
+		"name": "Love you so much",
+		"coins": 1
+	  },
+	  "4e7ad6bdf0a1d860c538f38026d4e812": {
+		"name": "Doughnut",
+		"coins": 30
+	  },
+	  "91058c626f0809291e7941969e4f0d05": {
+		"name": "Gamer 2025",
+		"coins": 299
+	  },
+	  "cbd7588c53ec3df1af0ed6d041566362": {
+		"name": "Super GG",
+		"coins": 100
+	  },
+	  "6cd022271dc4669d182cad856384870f": {
+		"name": "Hand hearts",
+		"coins": 100
+	  },
+	  "20b8f61246c7b6032777bb81bf4ee055": {
+		"name": "Perfume",
+		"coins": 20
+	  },
+	  "e9cafce8279220ed26016a71076d6a8a": {
+		"name": "You're awesome",
+		"coins": 1
+	  },
+	  "d78ed6496fd57286b42ac033acbee299": {
+		"name": "Mishka bear",
+		"coins": 100
+	  },
+	  "d2a59d961490de4c72fed3690e44d1ec": {
+		"name": "Music on Stage",
+		"coins": 1
+	  },
+	  "693ed273f16deff9e947a29a423c5816": {
+		"name": "Sushi Set",
+		"coins": 20
+	  },
+	  "e033c3f28632e233bebac1668ff66a2f": {
+		"name": "Friendship Necklace",
+		"coins": 10
+	  },
+	  "802a21ae29f9fae5abe3693de9f874bd": {
+		"name": "TikTok",
+		"coins": 1
+	  },
+	  "148eef0884fdb12058d1c6897d1e02b9": {
+		"name": "Corgi",
+		"coins": 299
+	  },
+	  "e0589e95a2b41970f0f30f6202f5fce6": {
+		"name": "Money Gun",
+		"coins": 500
+	  },
+	  "485175fda92f4d2f862e915cbcf8f5c4": {
+		"name": "Star",
+		"coins": 99
+	  },
+	  "ab0a7b44bfc140923bb74164f6f880ab": {
+		"name": "Love you",
+		"coins": 1
+	  },
+	  "0f158a08f7886189cdabf496e8a07c21": {
+		"name": "Paper Crane",
+		"coins": 99
+	  },
+	  "d72381e125ad0c1ed70f6ef2aff6c8bc": {
+		"name": "Little Ghost",
+		"coins": 10
+	  },
+	  "e45927083072ffe0015253d11e11a3b3": {
+		"name": "Pho",
+		"coins": 10
+	  },
+	  "c2413f87d3d27ac0a616ac99ccaa9278": {
+		"name": "Spooky Cat",
+		"coins": 1200
+	  },
+	  "1bdf0b38142a94af0f71ea53da82a3b1": {
+		"name": "Bouquet",
+		"coins": 100
+	  },
+	  "3ac5ec732f6f4ba7b1492248bfea83d6": {
+		"name": "Birthday Cake",
+		"coins": 1
+	  },
+	  "c836c81cc6e899fe392a3d11f69fafa3": {
+		"name": "Boo's Town",
+		"coins": 15000
+	  },
+	  "d53125bd5416e6f2f6ab61da02ddd302": {
+		"name": "Lucky Pig",
+		"coins": 10
+	  },
+	  "c2cd98b5d3147b983fcbf35d6dd38e36": {
+		"name": "Balloon Gift Box",
+		"coins": 100
+	  },
+	  "79a02148079526539f7599150da9fd28": {
+		"name": "Galaxy",
+		"coins": 1000
+	  },
+	  "863e7947bc793f694acbe970d70440a1": {
+		"name": "Forever Rosa",
+		"coins": 399
+	  },
+	  "968820bc85e274713c795a6aef3f7c67": {
+		"name": "Ice Cream Cone",
+		"coins": 1
+	  },
+	  "d244d4810758c3227e46074676e33ec8": {
+		"name": "Trick or Treat",
+		"coins": 299
+	  },
+	  "c9734b74f0e4e79bdfa2ef07c393d8ee": {
+		"name": "Pumpkin",
+		"coins": 1
+	  },
+	  "ff861a220649506452e3dc35c58266ea": {
+		"name": "Peach",
+		"coins": 5
+	  },
+	  "30063f6bc45aecc575c49ff3dbc33831": {
+		"name": "Star Throne",
+		"coins": 7999
+	  },
+	  "cb909c78f2412e4927ea68d6af8e048f": {
+		"name": "Boo the Ghost",
+		"coins": 88
+	  },
+	  "0573114db41d2cf9c7dd70c8b0fab38e": {
+		"name": "Okay",
+		"coins": 5
+	  },
+	  "312f721603de550519983ca22f5cc445": {
+		"name": "Shamrock",
+		"coins": 10
+	  },
+	  "a40b91f7a11d4cbce780989e2d20a1f4": {
+		"name": "Ice cream",
+		"coins": 5
+	  },
+	  "2db38e8f2a9fb804cb7d3bd2a0ba635c": {
+		"name": "Love Balloon",
+		"coins": 500
+	  },
+	  "0183cfcfc0dac56580cdc43956b73bfe": {
+		"name": "Gimme The Vote",
+		"coins": 1
+	  },
+	  "3c5e5fc699ed9bee71e79cc90bc5ab37": {
+		"name": "Drip Brewing",
+		"coins": 10
+	  },
+	  "43e1dee87ec71c57ab578cb861bbd749": {
+		"name": "Music Play",
+		"coins": 1
+	  },
+	  "b48c69f4df49c28391bcc069bbc31b41": {
+		"name": "You're Amazing",
+		"coins": 500
+	  },
+	  "cb4e11b3834e149f08e1cdcc93870b26": {
+		"name": "Confetti",
+		"coins": 100
+	  },
+	  "909e256029f1649a9e7e339ef71c6896": {
+		"name": "Potato",
+		"coins": 5
+	  },
+	  "d4faa402c32bf4f92bee654b2663d9f1": {
+		"name": "Coral",
+		"coins": 499
+	  },
+	  "97a26919dbf6afe262c97e22a83f4bf1": {
+		"name": "Swan",
+		"coins": 699
+	  },
+	  "a03bf81f5759ed3ffb048e1ca71b2b5e": {
+		"name": "Good Night",
+		"coins": 10
+	  },
+	  "01d07ef5d45eeedce64482be2ee10a74": {
+		"name": "Dumplings",
+		"coins": 10
+	  },
+	  "90a405cf917cce27a8261739ecd84b89": {
+		"name": "Phoenix Flower",
+		"coins": 5
+	  },
+	  "2c9cec686b98281f7319b1a02ba2864a": {
+		"name": "Lock and Key",
+		"coins": 199
+	  },
+	  "d990849e0435271bc1e66397ab1dec35": {
+		"name": "Singing Mic",
+		"coins": 399
+	  },
+	  "0115cb20f6629dc50d39f6b747bddf73": {
+		"name": "Wedding",
+		"coins": 1500
+	  },
+	  "96d9226ef1c33784a24d0779ad3029d3": {
+		"name": "Glowing Jellyfish",
+		"coins": 1000
+	  },
+	  "af980f4ec9ed73f3229df8dfb583abe6": {
+		"name": "Future Encounter",
+		"coins": 1500
+	  },
+	  "4227ed71f2c494b554f9cbe2147d4899": {
+		"name": "Train",
+		"coins": 899
+	  },
+	  "1d1650cd9bb0e39d72a6e759525ffe59": {
+		"name": "Watermelon Love",
+		"coins": 1000
+	  },
+	  "ed2cc456ab1a8619c5093eb8cfd3d303": {
+		"name": "Sage the Smart Bean",
+		"coins": 399
+	  },
+	  "9494c8a0bc5c03521ef65368e59cc2b8": {
+		"name": "Fireworks",
+		"coins": 1088
+	  },
+	  "3cbaea405cc61e8eaab6f5a14d127511": {
+		"name": "Rosie the Rose Bean",
+		"coins": 399
+	  },
+	  "767d7ea90f58f3676bbc5b1ae3c9851d": {
+		"name": "Rocky the Rock Bean",
+		"coins": 399
+	  },
+	  "9f8bd92363c400c284179f6719b6ba9c": {
+		"name": "Boxing Gloves",
+		"coins": 299
+	  },
+	  "f76750ab58ee30fc022c9e4e11d25c9d": {
+		"name": "Blooming Ribbons",
+		"coins": 1000
+	  },
+	  "0e3769575f5b7b27b67c6330376961a4": {
+		"name": "Jollie the Joy Bean",
+		"coins": 399
+	  },
+	  "1153dd51308c556cb4fcc48c7d62209f": {
+		"name": "Fruit Friends",
+		"coins": 299
+	  },
+	  "fa6bd8486df33dbe732381fa5c6cf441": {
+		"name": "Lovely Music",
+		"coins": 999
+	  },
+	  "af67b28480c552fd8e8c0ae088d07a1d": {
+		"name": "Under Control",
+		"coins": 1500
+	  },
+	  "71883933511237f7eaa1bf8cd12ed575": {
+		"name": "Meteor Shower",
+		"coins": 3000
+	  },
+	  "6517b8f2f76dc75ff0f4f73107f8780e": {
+		"name": "Motorcycle",
+		"coins": 2988
+	  },
+	  "3f1945b0d96e665a759f747e5e0cf7a9": {
+		"name": "Cooper Flies Home",
+		"coins": 1999
+	  },
+	  "1ea8dbb805466c4ced19f29e9590040f": {
+		"name": "Chasing the Dream",
+		"coins": 1500
+	  },
+	  "1420cc77d628c49516b9330095101496": {
+		"name": "Love Explosion",
+		"coins": 1500
+	  },
+	  "5d456e52403cefb87d6d78c9cabb03db": {
+		"name": "The Running 9",
+		"coins": 1399
+	  },
+	  "6b103f9ea6c313b8df68be92e54202cc": {
+		"name": "Shaking Drum",
+		"coins": 2500
+	  },
+	  "e7ce188da898772f18aaffe49a7bd7db": {
+		"name": "Sports Car",
+		"coins": 7000
+	  },
+	  "1d067d13988e8754ed6adbebd89b9ee8": {
+		"name": "Flying Jets",
+		"coins": 5000
+	  },
+	  "f334260276d5fa0de91c5fb61e26d07d": {
+		"name": "Lantern Road",
+		"coins": 5000
+	  },
+	  "921c6084acaa2339792052058cbd3fd3": {
+		"name": "Private Jet",
+		"coins": 4888
+	  },
+	  "universe": {
+		"name": "Universe",
+		"coins": 34999
+	  },
+	  "lion": {
+		"name": "Lion",
+		"coins": 29999
+	  },
+	  "drama-king": {
+		"name": "Drama King",
+		"coins": 49999
+	  },
+	  "donut-tower": {
+		"name": "Donut Tower",
+		"coins": 4999
+	  },
+	  "diamond-crown": {
+		"name": "Diamond Crown",
+		"coins": 5999
+	  },
+	  "tiktok-crown": {
+		"name": "TikTok Crown",
+		"coins": 8999
+	  },
+	  "fans_starter_upgraded_gift": {
+		"name": "upgraded gift"
+	  }
+	};
+
 
 	function getIdFromUrl(url) {
 		let resourceMatch = url.match(/resource\/([^.]+)(?:\.png|\.webp)/);
@@ -626,6 +712,41 @@
 		return false;
 	}
 
+	function collectEventTokens(element, maxDepth = 4) {
+		const tokens = [];
+		let current = element;
+		let depth = 0;
+		while (current && depth < maxDepth) {
+			if (current.dataset && typeof current.dataset.e2e === "string" && current.dataset.e2e) {
+				tokens.push(current.dataset.e2e.toLowerCase());
+			}
+			current = current.parentElement;
+			depth += 1;
+		}
+		return tokens;
+	}
+
+	function deriveEventHints(element) {
+		const tokens = collectEventTokens(element);
+		if (!tokens.length) {
+			return {
+				hasEventIndicator: false,
+				join: false,
+				share: false,
+				follow: false,
+				like: false
+			};
+		}
+		const normalized = tokens.join(" ");
+		const compact = normalized.replace(/[^a-z]/g, "");
+		const join = compact.includes("join") || (compact.includes("enter") && !compact.includes("center"));
+		const share = compact.includes("share");
+		const follow = compact.includes("follow");
+		const like = compact.includes("like");
+		const hasEventIndicator = join || share || follow || like || tokens.some(token => token.includes("social") || token.includes("system") || token.includes("event"));
+		return { hasEventIndicator, join, share, follow, like };
+	}
+
 	function processMessage(ele) {
 		if (!ele || ele.dataset.skip) {
 			return;
@@ -641,8 +762,14 @@
 			return;
 		}
 		ele.dataset.skip = ++msgCount;
+		const eventHints = deriveEventHints(ele);
 		var ital = false;
 		if (ele.dataset.e2e && (ele.dataset.e2e == "social-message")) {
+			if (!settings.captureevents) {
+				return;
+			}
+			ital = true;
+		} else if (eventHints.hasEventIndicator) {
 			if (!settings.captureevents) {
 				return;
 			}
@@ -655,6 +782,7 @@
 				chatimg = "";
 			} else {
 				chatimg = chatimg.src;
+				chatimg.dataset.skip = true;
 			}
 		} catch (e) {}
 		updateLastInputTime();
@@ -696,7 +824,7 @@
 				chatbadges = [];
 				cb.forEach(cbimg => {
 					try {
-						cbimg.skip = true;
+						cbimg.dataset.skip = true;
 						if (cbimg.src) {
 							chatbadges.push(cbimg.src + "");
 							if (cbimg.src.includes("/moderator_")) {
@@ -790,22 +918,31 @@
 		if (chatmessage == "Moderator") {
 			chatmessage = "";
 		}
-		if (!chatmessage && ele.querySelector("[data-e2e='message-owner-name']")?.nextElementSibling) {
+		if (!chatmessage && ele.querySelector("[data-e2e='message-owner-name']")?.parentElement?.parentElement) {
 			ital = "gift";
-			chatmessage = getAllContentNodes(ele.querySelector("[data-e2e='message-owner-name']").nextElementSibling);
+			chatmessage = getAllContentNodes(ele.querySelector("[data-e2e='message-owner-name']").parentElement.parentElement);
+			if (chatmessage) {
+				chatmessage = chatmessage.trim();
+				if (chatname && chatmessage.startsWith(chatname))
+					chatmessage = chatmessage.slice(chatname.length + 1);
+			}
 		}
 		var hasdonation = "";
 		try {
-			if (chatmessage.includes("x") && chatmessage.includes("<img src=") && chatmessage.includes(".tiktokcdn.com/img/")) {
+			// Normalize HTML entity to multiplication sign
+			if (chatmessage) chatmessage = chatmessage.replace(/&times;?/g, '×');
+			if (chatmessage.includes("×") && chatmessage.includes("<img src=") && chatmessage.includes(".tiktokcdn.com/img/")) {
 				chatmessage = chatmessage.replace("<img src=", " <img src=");
-				chatmessage = chatmessage.replace('.png">x', '.png"> x');
-				chatmessage = chatmessage.replace(".png'>x", ".png'> x");
+				chatmessage = chatmessage.replace('.png">×', '.png"> ×');
+				chatmessage = chatmessage.replace(".png'>×", ".png'> ×");
+				
+				// keep original × symbol for accurate parsing
 				
 				if (settings.tiktokdonations || !settings.notiktokdonations) {
 					// Extract image URL and quantity directly
-					var imgMatch = chatmessage.match(/<img src="([^"]+\.tiktokcdn\.com\/img\/[^"]+)"[^>]*>\s*x(\d+)/i);
+					var imgMatch = chatmessage.match(/<img src="([^"]+\.tiktokcdn\.com\/img\/[^"]+)"[^>]*>\s*×\s*(\d+)/i);
 					if (!imgMatch) {
-						imgMatch = chatmessage.match(/<img src='([^']+\.tiktokcdn\.com\/img\/[^']+)'[^>]*>\s*x(\d+)/i);
+						imgMatch = chatmessage.match(/<img src='([^']+\.tiktokcdn\.com\/img\/[^']+)'[^>]*>\s*×\s*(\d+)/i);
 					}
 					
 					if (imgMatch) {
@@ -852,31 +989,43 @@
 		} else if (chatmessage) {
 			chatmessage = chatmessage.trim();
 		}
+		let normalizedMessage = chatmessage ? chatmessage.toLowerCase() : "";
 		if (chatmessage == "Moderator") {
 			return;
 		}
 		if (chatmessage && (chatmessage === "----")) {
 			return;
 		}
+		if (chatmessage && (chatmessage === "**")) {
+			return;
+		}
 		if (chatname && (chatimg || chatbadges || membership)) {
 			avatarCache.add(chatname, chatimg, chatbadges, membership, nameColor);
 		}
-		if ((ital === true) && chatmessage && chatmessage.includes("joined")) {
+		const compactMessage = normalizedMessage.replace(/[^a-z]/g, "");
+		const joinFromMessage = compactMessage.includes("joined") || (compactMessage.includes("enter") && !compactMessage.includes("center"));
+		const shareFromMessage = compactMessage.includes("share");
+		const followFromMessage = compactMessage.includes("follow");
+		const likeFromMessage = compactMessage.includes("like");
+
+		const isJoinEvent = eventHints.join || ((ital === true || eventHints.hasEventIndicator) && joinFromMessage);
+		const isShareEvent = eventHints.share || ((ital === true || eventHints.hasEventIndicator) && shareFromMessage);
+		const isFollowEvent = eventHints.follow || ((ital === true || eventHints.hasEventIndicator) && followFromMessage);
+		const isLikeEvent = eventHints.like || ((ital === true || eventHints.hasEventIndicator) && likeFromMessage);
+
+		if (isJoinEvent) {
 			if (!settings.capturejoinedevent) {
 				return;
 			}
 			ital = "joined";
-			//if (!chatname) {
-			//	return;
-			//}
-		} else if ((ital === true) && chatmessage && chatmessage.includes("shared")) {
+		} else if (isShareEvent) {
 			return;
-		} else if ((ital === true) && chatmessage && chatmessage.includes("followed")) {
+		} else if (isFollowEvent) {
 			ital = "followed";
 			if (!chatname) {
 				return;
 			}
-		} else if ((ital === true) && chatmessage && chatmessage.includes("liked")) {
+		} else if (isLikeEvent) {
 			ital = "liked";
 			if (!chatname) {
 				return;
@@ -912,7 +1061,9 @@
 			}
 		}
 		
-		
+		if (chatmessage && chatmessage.startsWith("Some comments in this LIVE were filtered to protect the community’s experience")){
+			return;
+		}
 		
 		if (messageLog?.isDuplicate(chatname, chatmessage)) {
 			////console.log("duplicate message; skipping",chatname, chatmessage);
@@ -932,11 +1083,25 @@
 		data.textonly = settings.textonlymode || false;
 		data.type = "tiktok";
 		data.event = ital;
+		if (data.event && typeof data.nameColor === "string") {
+			const normalizedColor = data.nameColor.trim().toLowerCase();
+			const compactColor = normalizedColor.replace(/\s/g, "");
+			if (
+				normalizedColor === "black" ||
+				normalizedColor === "#000" ||
+				normalizedColor === "#000000" ||
+				compactColor === "rgb(0,0,0)" ||
+				compactColor === "rgba(0,0,0,1)"
+			) {
+				data.nameColor = "";
+			}
+		}
 		if (!StreamState.isValid() && StreamState.getCurrentChannel()) {
 			avatarCache.cleanup();
 			////console.log("Has the channel changed? If so, click the page to validate it");
 			return;
 		}
+		lastMessageTime = Date.now();
 		pushMessage(data);
 	}
 
@@ -965,6 +1130,7 @@
 		} catch (e) {}
 		ele.dataset.skip = ++msgCount;
 		var chatmessage = "";
+		const eventHints = deriveEventHints(ele);
 		let try1 = ele.querySelector("[data-e2e='message-owner-name']");
 		if (try1) {
 			try1 = try1?.nextElementSibling || try1.nextSibling;
@@ -981,46 +1147,53 @@
 		var ital = true;
 		if (chatmessage && (ele.classList.contains("DivGiftMessage") || ele.querySelector("[class*='SpanGiftCount']"))) {
 			ital = "gift";
-			try {
-				if (chatmessage.includes("x") && chatmessage.includes("<img src=") && chatmessage.includes(".tiktokcdn.com/img/")) {
-					chatmessage = chatmessage.replace("<img src=", " <img src=");
-					chatmessage = chatmessage.replace('.png">x', '.png"> x');
-					chatmessage = chatmessage.replace(".png'>x", ".png'> x");
+					try {
+						// Normalize HTML entity to multiplication sign
+						if (chatmessage) chatmessage = chatmessage.replace(/&times;?/g, '×');
+						if ((chatmessage.includes("×")) && chatmessage.includes("<img src=") && chatmessage.includes(".tiktokcdn.com/img/")) {
+						chatmessage = chatmessage.replace("<img src=", " <img src=");
+						chatmessage = chatmessage.replace('.png">×', '.png"> ×');
+						chatmessage = chatmessage.replace(".png'>×", ".png'> ×");
+						// keep original × for matching and parsing
+					
 					if (settings.tiktokdonations || !settings.notiktokdonations) {
 						if (validateTikTokDonationMessage(chatmessage)) {
+							try {
 							var donation = parseDonationMessage(chatmessage);
-							if (donation.isValid && donation.imageSrc) {
-								var giftid = getIdFromUrl(donation.imageSrc);
-								if (giftid) {
-									if (giftMapping[giftid]) {
-										var valuea = giftMapping[giftid].coins || giftMapping[giftid].name;
-									} else {
-										try {
-											var valuea = document.querySelector("img[src*='" + giftid + "']").parentNode.querySelector("svg").nextElementSibling.textContent.trim();
-											if (parseInt(valuea) == valuea) {
-												giftMapping[giftid] = {
-													coins: parseInt(valuea)
-												};
-											}
-										} catch (e) {
-											if (donation.quantity > 1) {
-												var valuea = "gifts";
-											} else {
-												var valuea = "gift";
-											}
-										}
-									}
-									if (parseInt(valuea) == valuea) {
-										valuea = (donation.quantity * parseInt(valuea));
-										if (valuea > 1) {
-											hasdonation = valuea + " coins";
+								if (donation.isValid && donation.imageSrc) {
+									var giftid = getIdFromUrl(donation.imageSrc);
+									if (giftid) {
+										if (giftMapping[giftid]) {
+											var valuea = giftMapping[giftid].coins || giftMapping[giftid].name;
 										} else {
-											hasdonation = valuea + " coin";
+											try {
+												var valuea = document.querySelector("img[src*='" + giftid + "']").parentNode.querySelector("svg").nextElementSibling.textContent.trim();
+												if (parseInt(valuea) == valuea) {
+													giftMapping[giftid] = {
+														coins: parseInt(valuea)
+													};
+												}
+											} catch (e) {
+												if (donation.quantity > 1) {
+													var valuea = "gifts";
+												} else {
+													var valuea = "gift";
+												}
+											}
 										}
-									} else {
-										hasdonation = donation.quantity + " " + valuea;
+										if (parseInt(valuea) == valuea) {
+											valuea = (donation.quantity * parseInt(valuea));
+											if (valuea > 1) {
+												hasdonation = valuea + " coins";
+											} else {
+												hasdonation = valuea + " coin";
+											}
+										} else {
+											hasdonation = donation.quantity + " " + valuea;
+										}
 									}
 								}
+							} catch(e){
 							}
 						}
 					}
@@ -1033,22 +1206,34 @@
 		if (!chatmessage || (chatmessage === "----")) {
 			return;
 		}
-		if ((ital === true) && chatmessage && (chatmessage.includes("joined"))) {
+		if (chatmessage && (chatmessage === "**")) {
+			return;
+		}
+		const normalizedMessage = chatmessage ? chatmessage.toLowerCase() : "";
+		const compactMessage = normalizedMessage.replace(/[^a-z]/g, "");
+		const joinFromMessage = compactMessage.includes("joined") || (compactMessage.includes("enter") && !compactMessage.includes("center"));
+		const shareFromMessage = compactMessage.includes("share");
+		const followFromMessage = compactMessage.includes("follow");
+		const likeFromMessage = compactMessage.includes("like");
+
+		const isJoinEvent = eventHints.join || ((ital === true || eventHints.hasEventIndicator) && joinFromMessage);
+		const isShareEvent = eventHints.share || ((ital === true || eventHints.hasEventIndicator) && shareFromMessage);
+		const isFollowEvent = eventHints.follow || ((ital === true || eventHints.hasEventIndicator) && followFromMessage);
+		const isLikeEvent = eventHints.like || ((ital === true || eventHints.hasEventIndicator) && likeFromMessage);
+
+		if (isJoinEvent) {
 			if (!settings.capturejoinedevent) {
 				return;
 			}
 			ital = "joined";
-			//if (!chatname) {
-			//	return;
-			//}
-		} else if ((ital === true) && chatmessage.includes("shared")) {
+		} else if (isShareEvent) {
 			return;
-		} else if ((ital === true) && chatmessage.includes("followed")) {
+		} else if (isFollowEvent) {
 			ital = "followed";
 			if (!chatname) {
 				return;
 			}
-		} else if ((ital === true) && chatmessage && chatmessage.includes("liked")) {
+		} else if (isLikeEvent) {
 			ital = "liked";
 			if (!chatname) {
 				return;
@@ -1079,10 +1264,24 @@
 		data.textonly = settings.textonlymode || false;
 		data.type = "tiktok";
 		data.event = ital;
+		if (data.event && typeof data.nameColor === "string") {
+			const normalizedColor = data.nameColor.trim().toLowerCase();
+			const compactColor = normalizedColor.replace(/\s/g, "");
+			if (
+				normalizedColor === "black" ||
+				normalizedColor === "#000" ||
+				normalizedColor === "#000000" ||
+				compactColor === "rgb(0,0,0)" ||
+				compactColor === "rgba(0,0,0,1)"
+			) {
+				data.nameColor = "";
+			}
+		}
 		if (!StreamState.isValid() && StreamState.getCurrentChannel()) {
 			////console.log("Has the channel changed? If so, click the page to validate it");
 			return;
 		}
+		lastMessageTime = Date.now();
 		pushMessage(data);
 	}
 	var bigDUPE = false;
@@ -1090,7 +1289,9 @@
 	let observedDomElementForObserver2 = null;
 	var observer = false;
 	var observer2 = false;
-	var counter =0;
+	var counter = 0;
+	var lastMessageTime = Date.now();
+	var observerHealthCheckInterval = 60000; // Check every minute
 	
 	function start() {
 		if (!isExtensionOn) {
@@ -1099,48 +1300,79 @@
 		}
 		counter+=1;
 		
+		// Health check: If no messages for over 2 minutes and observers exist, force restart
+		if (observer && (Date.now() - lastMessageTime > 120000) && counter % 30 === 0) {
+			console.log("[TikTok] No messages for 2+ minutes, forcing observer restart");
+			if (observer) {
+				observer.disconnect();
+				observer = false;
+				observedDomElementForObserver1 = null;
+			}
+			if (observer2) {
+				observer2.disconnect();
+				observer2 = false;
+				observedDomElementForObserver2 = null;
+			}
+		}
+		
 		if (settings.showviewercount || settings.hypemode) {
 			try {
 
 				if (!StreamState.isValid() && StreamState.getCurrentChannel()) {
 					// not active
 				} else if (counter%15==1){
-					var viewerCount = document.querySelector("[data-e2e='live-people-count']");
+					var viewerCount = document.querySelector("[data-e2e='live-people-count'], .flex.justify-start.items-center .P4-Regular.text-UIText3");
+					let views = 0; // Default to 0 if not found
 
 					if (viewerCount && viewerCount.textContent) {
-						let views = viewerCount.textContent;
-						let multiplier = 1;
-						if (views.includes("K")) {
-							multiplier = 1000;
-							views = views.replace("K", "");
-						} else if (views.includes("M")) {
-							multiplier = 1000000;
-							views = views.replace("M", "");
+						let viewText = viewerCount.textContent;
+
+						if (viewText.startsWith("· ")){
+							viewText = viewText.replace("· ","");
 						}
-						if (views == parseFloat(views)) {
-							views = parseFloat(views) * multiplier;
-							chrome.runtime.sendMessage(
-								chrome.runtime.id,
-								({
-									message: {
-										type: 'tiktok',
-										event: 'viewer_update',
-										meta: views
-									}
-								}),
-								function(e) {}
-							);
+
+						let multiplier = 1;
+						if (viewText.includes("K")) {
+							multiplier = 1000;
+							viewText = viewText.replace("K", "");
+						} else if (viewText.includes("M")) {
+							multiplier = 1000000;
+							viewText = viewText.replace("M", "");
+						}
+						if (viewText == parseFloat(viewText)) {
+							views = parseFloat(viewText) * multiplier;
 						}
 					}
+
+					// Always send viewer update (even if 0) to clear stale counts
+					chrome.runtime.sendMessage(
+						chrome.runtime.id,
+						({
+							message: {
+								type: 'tiktok',
+								event: 'viewer_update',
+								meta: views
+							}
+						}),
+						function(e) {}
+					);
 				}
 			} catch (e) {
 				////console.error(e);
 			}
 		}
 		
-		if (observer && observedDomElementForObserver1 && observedDomElementForObserver1.isConnected) {
-			//console.log("<<>");
-			return;
+		if (observer && observedDomElementForObserver1) {
+			// Check if the observed element is still connected
+			if (!observedDomElementForObserver1.isConnected) {
+				console.log("[TikTok] Observer target disconnected, will re-establish");
+				observer.disconnect();
+				observer = false;
+				observedDomElementForObserver1 = null;
+			} else {
+				//console.log("<<>");
+				return;
+			}
 		}
 		//console.log("..................");
 		let target = null;
@@ -1186,12 +1418,13 @@
 		console.log("subtree: "+subtree);
 		////console.log("Attempting to start social stream on target:", target);
 		observer = new MutationObserver((mutations) => {
-			if (!isExtensionOn) return;
-			mutations.forEach((mutation) => {
-				if (mutation.addedNodes.length) {
-					//console.warn(mutation.addedNodes);
-					for (let i = 0; i < mutation.addedNodes.length; i++) {
-						try {
+			try {
+				if (!isExtensionOn) return;
+				mutations.forEach((mutation) => {
+					if (mutation.addedNodes.length) {
+						//console.warn(mutation.addedNodes);
+						for (let i = 0; i < mutation.addedNodes.length; i++) {
+							try {
 							const node = mutation.addedNodes[i];
 							if (!node.isConnected) continue;
 							if (!subtree) {
@@ -1220,6 +1453,15 @@
 					}
 				}
 			});
+			} catch (err) {
+				console.error("[TikTok] Observer error:", err);
+				// If there's a critical error, try to restart
+				if (observer) {
+					observer.disconnect();
+					observer = false;
+					observedDomElementForObserver1 = null;
+				}
+			}
 		});
 		const currentTargetForTimeout = target;
 		setTimeout(function() {
@@ -1256,15 +1498,22 @@
 		if (!isExtensionOn || !settings.captureevents) {
 			return;
 		}
-		if (observer2 && observedDomElementForObserver2 && observedDomElementForObserver2.isConnected) {
-			return;
+		if (observer2 && observedDomElementForObserver2) {
+			// Check if the observed element is still connected
+			if (!observedDomElementForObserver2.isConnected) {
+				console.log("[TikTok] Observer2 target disconnected, will re-establish");
+				observer2.disconnect();
+				observer2 = false;
+				observedDomElementForObserver2 = null;
+			} else {
+				return;
+			}
 		}
 		var target2 = document.querySelector('[class*="DivBottomStickyMessageContainer"], [class="w-full h-auto overflow-hidden flex-shrink-0 max-h-[200px] min-h-32"]');
 		if (!target2 && other && other.isConnected && other.nextElementSibling) {
 			target2 = other.nextElementSibling;
 		}
 		if (!target2) {
-			console.log("Start2: No target found for secondary observer.");
 			return;
 		}
 		if (!window.location.href.includes("livecenter") &&
@@ -1276,30 +1525,38 @@
 			observer2 = false;
 			observedDomElementForObserver2 = null;
 		}
-		console.log("Attempting to start secondary event stream on target:", target2);
 		observer2 = new MutationObserver((mutations) => {
-			if (!settings.captureevents || !isExtensionOn) return;
-			mutations.forEach((mutation) => {
-				if (mutation.addedNodes.length) {
-					for (let i = 0; i < mutation.addedNodes.length; i++) {
-						try {
+			try {
+				if (!settings.captureevents || !isExtensionOn) return;
+				mutations.forEach((mutation) => {
+					if (mutation.addedNodes.length) {
+						for (let i = 0; i < mutation.addedNodes.length; i++) {
+							try {
 							const node = mutation.addedNodes[i];
 							if (!node.isConnected) continue;
 							if (node.nodeName === "DIV") {
-								const typeOfEvent = node.dataset?.e2e || node.querySelector?.("[data-e2e]")?.dataset.e2e;
-								if (typeOfEvent) {
-									if (!settings.capturejoinedevent && typeOfEvent === "enter-message") {
-										continue;
-									}
-									processEvent(node);
-								} else {
-									processEvent(node);
+								const typeOfEvent = node.dataset?.e2e || node.querySelector?.("[data-e2e]")?.dataset.e2e || "";
+								const normalizedType = typeof typeOfEvent === "string" ? typeOfEvent.toLowerCase() : "";
+								const compactType = normalizedType.replace(/[^a-z]/g, "");
+								const isJoinNotification = compactType.includes("join") || (compactType.includes("enter") && !compactType.includes("center"));
+								if (!settings.capturejoinedevent && isJoinNotification) {
+									continue;
 								}
+								processEvent(node);
 							}
 						} catch (e) {}
 					}
 				}
 			});
+			} catch (err) {
+				console.error("[TikTok] Observer2 error:", err);
+				// If there's a critical error, try to restart
+				if (observer2) {
+					observer2.disconnect();
+					observer2 = false;
+					observedDomElementForObserver2 = null;
+				}
+			}
 		});
 		if (target2.isConnected) {
 			observer2.observe(target2, {
@@ -1378,6 +1635,7 @@
 					}
 					if ("focusChat" == request) {
 						if (!StreamState.isValid() && StreamState.getCurrentChannel()) {
+							sendResponse(false);
 							return;
 						}
 						if (settings.customtiktokstate) {
@@ -1386,11 +1644,14 @@
 								channel = channel[1].split("/")[0].trim();
 							}
 							if (!channel) {
+								sendResponse(false);
 								return;
 							}
 							if (settings.customtiktokaccount && settings.customtiktokaccount.textsetting && ((settings.customtiktokaccount.textsetting.toLowerCase() !== channel.toLowerCase()) && (settings.customtiktokaccount.textsetting.toLowerCase() !== "@" + channel.toLowerCase()))) {
+								sendResponse(false);
 								return;
 							} else if (!settings.customtiktokaccount) {
+								sendResponse(false);
 								return;
 							}
 						}
@@ -1471,12 +1732,17 @@
 		initialUrl: null,
 		lastUserInteraction: 0,
 		navigationTimeout: 10000,
+		previousChannel: null,
+		navigationCount: 0,
 		init() {
 			this.initialUrl = location.href;
 			this.lastUserInteraction = Date.now();
-			document.addEventListener('click', () => {
-				this.initialUrl = location.href;
-				this.lastUserInteraction = Date.now();
+			this.previousChannel = this.getCurrentChannel();
+			
+			// Track user interactions
+			document.addEventListener('click', (e) => {
+				// Reset state on user click
+				this.reset();
 				////console.log("Stream state reset by click");
 			});
 			document.addEventListener('keydown', () => {
@@ -1485,14 +1751,73 @@
 			document.addEventListener('touchstart', () => {
 				this.lastUserInteraction = Date.now();
 			});
+			
+			// Monitor URL changes via History API
+			const originalPushState = history.pushState;
+			const originalReplaceState = history.replaceState;
+			
+			history.pushState = function() {
+				originalPushState.apply(history, arguments);
+				StreamState.handleNavigation();
+			};
+			
+			history.replaceState = function() {
+				originalReplaceState.apply(history, arguments);
+				StreamState.handleNavigation();
+			};
+			
+			window.addEventListener('popstate', () => {
+				this.handleNavigation();
+			});
+		},
+		handleNavigation() {
+			const currentChannel = this.getCurrentChannel();
+			const timeSinceInteraction = Date.now() - this.lastUserInteraction;
+			
+			// If channel changed and it wasn't recent user interaction
+			if (currentChannel && this.previousChannel && 
+				currentChannel !== this.previousChannel && 
+				timeSinceInteraction > 1000) {
+				this.navigationCount++;
+				console.log(`[StreamState] Automated navigation detected: ${this.previousChannel} -> ${currentChannel}`);
+			}
+			
+			this.previousChannel = currentChannel;
 		},
 		isValid() {
 			const currentUrl = location.href;
+			const currentChannel = this.getCurrentChannel();
+			
+			// If URL hasn't changed, it's valid
 			if (currentUrl === this.initialUrl) {
 				return true;
 			}
+			
+			// If no channel in URL (not on a live page), consider invalid
+			if (!currentChannel) {
+				return false;
+			}
+			
+			// Check if this was a recent user interaction
 			const timeSinceInteraction = Date.now() - this.lastUserInteraction;
-			return timeSinceInteraction <= this.navigationTimeout;
+			if (timeSinceInteraction <= this.navigationTimeout) {
+				return true;
+			}
+			
+			// If we've detected multiple automated navigations, be more strict
+			if (this.navigationCount > 1) {
+				return false;
+			}
+			
+			// Check if we're still on the same channel
+			const initialChannel = this.initialUrl.match(/@([^/]+)/)?.[1];
+			return currentChannel === initialChannel;
+		},
+		reset() {
+			this.initialUrl = location.href;
+			this.lastUserInteraction = Date.now();
+			this.previousChannel = this.getCurrentChannel();
+			this.navigationCount = 0;
 		},
 		getCurrentChannel() {
 			const match = location.href.match(/@([^/]+)/);

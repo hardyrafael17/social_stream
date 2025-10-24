@@ -148,6 +148,9 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 function sendMessageToBackgroundPage(message, sendResponse) {
   log("sending message", message);
+  
+  // Always use runtime.sendMessage - the background page listens to chrome.runtime.onMessage
+  // regardless of whether it's a service worker background or a tab
   chrome.runtime.sendMessage(message.data, (response) => {
     log("response", response);
     if (chrome.runtime.lastError) {
@@ -214,12 +217,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     });
     return true; // Indicates that the response will be sent asynchronously
-  }// else if (request.type === 'getAuthToken') {
-  //  chrome.storage.local.get(['authToken'], function(result) {
-  //    sendResponse({token: result.authToken});
-  //  });
-  //  return true; // Important! Keeps the message channel open for async response
- // }
+  } else if (message.type === 'openEventFlowEditor') {
+    // Handle opening the Event Flow Editor
+    (async () => {
+      try {
+        const existingTabs = await chrome.tabs.query({ url: chrome.runtime.getURL('background.html') });
+        
+        if (existingTabs.length > 0) {
+          // Background.html is already open, switch to it with #editor hash
+          const tab = existingTabs[0];
+          await chrome.tabs.update(tab.id, { 
+            url: chrome.runtime.getURL('background.html#editor'),
+            active: true 
+          });
+          
+          // Focus the window containing the tab
+          if (tab.windowId) {
+            await chrome.windows.update(tab.windowId, { focused: true });
+          }
+          
+          sendResponse({ success: true, message: 'Switched to existing background tab' });
+        } else {
+          // No background.html tab exists, create a new one
+          const newTab = await chrome.tabs.create({
+            url: chrome.runtime.getURL('background.html#editor'),
+            active: true
+          });
+          
+          sendResponse({ success: true, message: 'Created new background tab' });
+        }
+      } catch (error) {
+        console.error('Error in openEventFlowEditor handler:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // Indicates that the response will be sent asynchronously
+  } else if (message.type === 'captureTabAudio') {
+	  chrome.tabCapture.capture({
+		  audio: true,
+		  video: false
+	  }, (stream) => {
+		  if (chrome.runtime.lastError) {
+			  sendResponse({ error: chrome.runtime.lastError.message });
+		  } else {
+			  // Create a stream ID to track this capture
+			  const streamId = stream.id;
+			  sendResponse({ streamId: streamId });
+
+			  // You can't directly pass the MediaStream to content script
+			  // Instead, you'd need to use it in the background or
+			  // inject it into the page context
+		  }
+	  });
+	  return true; // Will respond asynchronously
+  }
+  
 });
 
 // Ensure the background page is opened when the extension starts

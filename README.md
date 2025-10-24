@@ -108,6 +108,7 @@ Much more than just an overlay - Social Stream Ninja is a complete chat ecosyste
 - zoom.us (web version)
 - owncast demo page (`watch.owncast.online`, or for a pop-out chat version, open `https://watch.owncast.online/embed/chat/readwrite/`  )
 - crowdcast.io
+- lfg.tv
 - livestream.com
 - mixcloud.com (pop out chat)
 - ms teams (teams.live.com and teams.microsoft.com)
@@ -142,6 +143,7 @@ Much more than just an overlay - Social Stream Ninja is a complete chat ecosyste
 - bilibili.com (just regular view page /w chat; no pop out.)
 - Amazon Chime (https://app.chime.aws/meetings/xxxxxxxxx)
 - Locals.com (no pop out needed)
+- retake.tv
 - Nimo.TV (pop out chat, ie: https://www.nimo.tv/popout/chat/xxxx)
 - kick.com (pop out chat)
 - quickchannel.com (https://play.quickchannel.com/*)
@@ -209,6 +211,8 @@ Much more than just an overlay - Social Stream Ninja is a complete chat ecosyste
 - nextcloud (requires domain added)
 - favorited (studio pop out chat)
 - xeenon (not pop out ; dashboard)
+- streamelements (overlay page)
+- patreon
 
 There are additional sites supported, but not listed; refer to the sources folder for a more complete listing.
   
@@ -306,12 +310,14 @@ You will still need to manually redo these steps to update when needed, but you 
 
 ### Standalone version of the app
 
-There is an upcoming standalone version of Social Stream Ninja, which installs as an app, rather than as a browser extension.
+There is a now a standalone version of Social Stream Ninja, which installs as an app, rather than as a browser extension. It has the downsides of being blocked by some sites, but it offers better source organization and you don't need to keep windows open.
 
-To try out the preview test version of the app, you can download it below, but keep in mind that the bugs are still being worked out:
+You can download it below, but keep in mind that the bugs are still being worked out:
 
 [https://github.com/steveseguin/social_stream/releases/](https://github.com/steveseguin/social_stream/releases)
 MacOS and Windows 10/11 (x64) are supported currently, with limited Linux support now available via an AppImage.
+
+Source code the standalone app [is here](https://github.com/steveseguin/ssn_app).
 
 Please note:  If using the same session ID in both the browser extension and the standalone version, you will only be able to use one at a time. 
 
@@ -646,6 +652,7 @@ chatmessage | string | Chat message
 chatimg | string | URL or DataBlob (under ~55KB) of the user's avatar image
 type | lower-case string | the pre-qualified name of the source, eg: `twitch`, also used as the source png image
 sourceImg | string | an alternative URL to the source image; relative or absolute
+sourceName | string | the channel's name or the username of the host for the channel
 textonly | boolean | Whether the chat message is only plain text; or does it contain HTML, etc.
 hasDonation | string | The donation amount with its units.  eg: "3 roses" or "$50 USD".
 chatbadges | array | An array of URLs/Objects. If an object, it may define itself as an img/svg and other attributes

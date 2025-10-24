@@ -2,7 +2,20 @@ try{
 	var isExtensionOn = true;
 	var clientId = 'sjjsgy1sgzxmy346tdkghbyz4gtx0k'; 
 	var redirectURI = window.location.href.split("/twitch")[0]+"/twitch.html"; //  'https://socialstream.ninja/sources/websocket/twitch.html';
-	var scope = 'chat:read+chat:edit+channel:read:subscriptions+bits:read+moderator:read:followers+moderator:read:chatters';
+	var scope = [
+		'chat:read',
+		'chat:edit',
+		'bits:read',
+		'moderator:read:followers',
+		'moderator:read:chatters',
+		'channel:read:subscriptions',
+		// New scopes for moderation, ads, and redemptions
+		'moderator:manage:banned_users',
+		'moderator:manage:chat_messages',
+		'channel:read:ads',
+		'channel:manage:ads',
+		'channel:read:redemptions'
+	].join('+');
 	var ws;
 	var channel = '';
 	var username = "SocialStreamNinja"; // Not supported at the moment
@@ -28,6 +41,45 @@ try{
 	function clearStoredToken() {
 		localStorage.removeItem('twitchOAuthToken');
 		localStorage.removeItem('twitchChannel');
+	}
+	
+	let tokenExpirationHandled = false;
+	function handleTokenExpiration() {
+		// Prevent multiple simultaneous expiration handlers
+		if (tokenExpirationHandled) return;
+		tokenExpirationHandled = true;
+		
+		console.log('Token expired - clearing credentials and prompting for re-authentication');
+		
+		// Clear stored credentials
+		clearStoredToken();
+		localStorage.removeItem('twitchUserAlias');
+		sessionStorage.removeItem('twitchOAuthState');
+		sessionStorage.removeItem('twitchOAuthToken');
+		
+		// Clean up connections
+		if (websocket && websocket.readyState === WebSocket.OPEN) {
+			websocket.close();
+		}
+		if (eventSocket && eventSocket.readyState === WebSocket.OPEN) {
+			eventSocket.close();
+		}
+		
+		// Update UI
+		updateHeaderInfo(null, null);
+		document.querySelectorAll('.socket').forEach(ele => ele.classList.add('hidden'));
+		document.querySelector('.auth').classList.remove('hidden');
+		
+		// Show notification
+		const textarea = document.querySelector("#textarea");
+		if (textarea) {
+			textarea.innerHTML = '<div style="color: red; font-weight: bold;">Authentication expired. Please sign in again.</div>';
+		}
+		
+		// Reset flag after a delay
+		setTimeout(() => {
+			tokenExpirationHandled = false;
+		}, 5000);
 	}
 	function showAuthButton() {
 		const authElement = document.querySelector('.auth');
@@ -242,6 +294,7 @@ try{
 
 	let getViewerCountInterval = null;
 	let getFollowersInterval = null;
+	let tokenValidationInterval = null;
 	let badges = null;
 
 	async function validateToken(token) {
@@ -251,8 +304,43 @@ try{
 					'Authorization': `OAuth ${token}`
 				}
 			});
-			if (!response.ok) return null;
-			return await response.json();
+			if (!response.ok) {
+				if (response.status === 401 || response.status === 403) {
+					handleTokenExpiration();
+				}
+				return null;
+			}
+			const data = await response.json();
+			
+			// Update auth status indicator
+			const authStatus = document.getElementById('auth-status');
+			if (authStatus) {
+				if (data.expires_in && data.expires_in < 3600) {
+					// Token expires soon
+					authStatus.innerHTML = `⚠️ <span style="color: orange; font-size: 12px;">Expires in ${Math.floor(data.expires_in / 60)}m</span>`;
+					authStatus.title = `Authentication expires in ${Math.floor(data.expires_in / 60)} minutes`;
+				} else if (data.expires_in) {
+					// Token is valid
+					authStatus.innerHTML = `✅ <span style="color: green; font-size: 12px;">Valid</span>`;
+					authStatus.title = `Authentication valid for ${Math.floor(data.expires_in / 3600)} hours`;
+				}
+			}
+			
+			// Check if token will expire soon (within 1 hour)
+			if (data.expires_in && data.expires_in < 3600) {
+				console.warn(`Token expires in ${Math.floor(data.expires_in / 60)} minutes`);
+				// Show warning in UI
+				const textarea = document.querySelector("#textarea");
+				if (textarea && !document.querySelector('.token-expiry-warning')) {
+					const warning = document.createElement("div");
+					warning.className = 'token-expiry-warning';
+					warning.style.cssText = 'color: orange; font-weight: bold; padding: 5px; background: #fff3cd; border: 1px solid #ffeeba; border-radius: 4px; margin: 5px 0;';
+					warning.innerHTML = `⚠️ Authentication expires in ${Math.floor(data.expires_in / 60)} minutes. Please re-authenticate soon.`;
+					textarea.insertBefore(warning, textarea.firstChild);
+				}
+			}
+			
+			return data;
 		} catch (error) {
 			console.error('Token validation error:', error);
 			return null;
@@ -345,6 +433,18 @@ try{
 			clearInterval(getViewerCountInterval);
 			getViewerCountInterval = setInterval(() => getViewerCount(channel), 60000);
 			
+			// Set up periodic token validation
+			clearInterval(tokenValidationInterval);
+			tokenValidationInterval = setInterval(async () => {
+				const token = getStoredToken();
+				if (token) {
+					const validationResult = await validateToken(token);
+					if (!validationResult) {
+						console.log('Token validation failed during periodic check');
+					}
+				}
+			}, 300000); // Check every 5 minutes
+			
 		} catch (error) {
 			console.log('Error during connection setup:', error);
 		}
@@ -364,6 +464,12 @@ try{
 			  break;
 			case 'PRIVMSG':
 			  processMessage(parsedMessage);
+			  break;
+			case 'USERNOTICE':
+			  // Handle raids and other user notices
+			  if (settings.captureevents) {
+				processUserNotice(parsedMessage);
+			  }
 			  break;
 			case '366': // End of NAMES list
 			case 'CAP': // Capability acknowledgment
@@ -386,6 +492,28 @@ try{
 		}
 	  });
 	}
+
+	// Listen for UI moderation/ad requests from twitch.html
+	window.addEventListener('message', async (ev) => {
+		if (!ev?.data || ev.data.source !== 'twitch-ws-ui') return;
+		const { action, payload } = ev.data;
+		try {
+			if (action === 'ban') {
+				const ok = await banUser(payload?.login, payload?.seconds || 0, payload?.reason || '');
+				if (!ok) console.warn('Ban/timeout failed');
+			} else if (action === 'unban') {
+				const ok = await unbanUser(payload?.login);
+				if (!ok) console.warn('Unban failed');
+			} else if (action === 'ad') {
+				const ok = await startAdBreak(payload?.length || 60);
+				if (!ok) console.warn('Ad request failed');
+			} else if (action === 'ad_schedule') {
+				await fetchAdSchedule();
+			}
+		} catch (e) {
+			console.error('UI action error', e);
+		}
+	});
 
 	async function checkChannelPermissions(token, userId, channelId) {
 		try {
@@ -717,7 +845,69 @@ try{
 		}
 		return false;
 	}
-	function replaceEmotesWithImages(text) {
+	function replaceEmotesWithImages(text, twitchEmotes = null, isBitMessage = false) {
+		// First, handle Twitch native emotes if provided
+		if (twitchEmotes && Object.keys(twitchEmotes).length > 0) {
+			// Sort emote positions to replace from end to start (to maintain indices)
+			const sortedEmotes = Object.entries(twitchEmotes)
+				.flatMap(([emoteId, positions]) => 
+					positions.map(pos => ({ emoteId, start: parseInt(pos.start), end: parseInt(pos.end) }))
+				)
+				.sort((a, b) => b.start - a.start);
+			
+			// Replace emotes from end to start
+			let result = text;
+			sortedEmotes.forEach(({ emoteId, start, end }) => {
+				const emoteName = text.substring(start, end + 1);
+				if (settings.textonlymode) {
+					// In text-only mode, just keep the emote name
+					result = result.substring(0, start) + emoteName + result.substring(end + 1);
+				} else {
+					const emoteUrl = `https://static-cdn.jtvnw.net/emoticons/v2/${emoteId}/default/dark/2.0`;
+					const emoteImg = `<img src="${emoteUrl}" alt="${escapeHtml(emoteName)}" title="${escapeHtml(emoteName)}" class="regular-emote"/>`;
+					result = result.substring(0, start) + emoteImg + result.substring(end + 1);
+				}
+			});
+			text = result;
+		}
+		
+		// Handle cheermotes (bit emotes) if this is a bit message
+		if (isBitMessage) {
+			// Common cheermote patterns - includes standard and custom cheermotes
+			// Matches patterns like: Cheer100, 4Head100, Kappa1000, etc.
+			const cheermoteRegex = /\b(Cheer|Kappa|Kreygasm|SwiftRage|4Head|PJSalt|MrDestructoid|TriHard|NotLikeThis|FailFish|VoHiYo|PogChamp|FrankerZ|HeyGuys|DansGame|EleGiggle|BibleThump|Jebaited|SeemsGood|LUL|VoteYea|VoteNay|HotPokket|OpieOP|FutureMan|FBCatch|TBAngel|PeteZaroll|TwitchUnity|CoolStoryBob|PopCorn|KAPOW|PowerUpR|PowerUpL|DarkMode|HSCheers|PurpleStar|FBPass|FBRun|FBChallenge|RedCoat|GreenTeam|PurpleTeam|HolidayCheer|BitBoss|Streamlabs)(\d+)\b/gi;
+			
+			text = text.replace(cheermoteRegex, (match, emoteName, bitAmount) => {
+				const amount = parseInt(bitAmount);
+				
+				if (settings.textonlymode) {
+					// In text-only mode, just show the cheermote as text with a space before the number
+					return emoteName + ' ' + amount;
+				}
+				
+				// Determine tier based on bit amount
+				let tier = 1;
+				if (amount >= 10000) tier = 10000;
+				else if (amount >= 5000) tier = 5000;
+				else if (amount >= 1000) tier = 1000;
+				else if (amount >= 100) tier = 100;
+				
+				// Determine color based on tier
+				let color = '#9c3ee8'; // purple (100-999)
+				if (tier >= 10000) color = '#f43021'; // red
+				else if (tier >= 5000) color = '#1db2a5'; // blue/teal
+				else if (tier >= 1000) color = '#0eba26'; // green
+				else if (tier < 100) color = '#979797'; // gray
+				
+				// Build the cheermote URL
+				const cheermoteUrl = `https://d3aqoihi2n8ty8.cloudfront.net/actions/${emoteName.toLowerCase()}/dark/animated/${tier}/1.gif`;
+				
+				// Return the cheermote image with the bit amount displayed after it
+				return `<img src="${cheermoteUrl}" alt="${escapeHtml(emoteName + ' ' + amount)}" title="${escapeHtml(emoteName + ' ' + amount)}" class="regular-emote"/><strong style="color: ${color}; margin-left: 2px;">${amount}</strong>`;
+			});
+		}
+		
+		// Then handle third-party emotes (BTTV, 7TV, FFZ)
 		if (!EMOTELIST) {
 			return text;
 		}
@@ -725,6 +915,10 @@ try{
 		return text.replace(/(?<=^|\s)(\S+?)(?=$|\s)/g, (match, emoteMatch) => {
 			const emote = EMOTELIST[emoteMatch];
 			if (emote) {
+				if (settings.textonlymode) {
+					// In text-only mode, just return the emote text
+					return emoteMatch;
+				}
 				const escapedMatch = escapeHtml(emoteMatch);
 				const isZeroWidth = typeof emote !== "string" && emote.zw;
 				return `<img src="${typeof emote === 'string' ? emote : emote.url}" alt="${escapedMatch}" title="${escapedMatch}" class="${isZeroWidth ? 'zero-width-emote-centered' : 'regular-emote'}"/>`;
@@ -852,23 +1046,28 @@ try{
 		try {
 			const controller = new AbortController();
 			const timeout_id = setTimeout(() => controller.abort(), timeout);
+			let response;
 			if (!headers) {
-				const response = await fetch(URL, {
+				response = await fetch(URL, {
 					timeout: timeout,
 					signal: controller.signal
 				});
-				clearTimeout(timeout_id);
-				return response;
 			} else {
-				const response = await fetch(URL, {
+				response = await fetch(URL, {
 					timeout: timeout,
 					signal: controller.signal,
 					headers: headers
 				});
-				clearTimeout(timeout_id);
-				return response;
+			}
+			clearTimeout(timeout_id);
+			
+			// Check for 401/403 errors which indicate expired token
+			if (response.status === 401 || response.status === 403) {
+				console.error('Authentication error - token may be expired');
+				handleTokenExpiration();
 			}
 			
+			return response;
 		} catch (e) {
 			console.error(e); // Changed from errorlog to console.error
 			return await fetch(URL); // iOS 11.x/12.0
@@ -895,47 +1094,259 @@ try{
 		//console.log("Processing message:", parsedMessage);
 		const user = parsedMessage.prefix.split('!')[0];
 		const message = parsedMessage.trailing;
-		channel = parsedMessage.params[0] || channel;
-		const userInfo = await getUserInfo(user); 
+		// Clean channel name from params (remove # prefix)
+		if (parsedMessage.params[0]) {
+			channel = parsedMessage.params[0].replace(/^#/, '');
+		}
+		const userInfo = await getUserInfo(user);
+		
+		// Parse subscriber info from badge tags
+		let subscriber = "";
+		let subtitle = "";
+		let mod = false;
+		const badgeList = parseBadges(parsedMessage);
+		
+		if (parsedMessage.tags && parsedMessage.tags.badges && typeof parsedMessage.tags.badges === 'string') {
+			const badges = parsedMessage.tags.badges.split(',');
+			badges.forEach(badge => {
+				if (badge.startsWith('subscriber/')) {
+					subscriber = "Subscriber";
+					const months = badge.split('/')[1];
+					if (months && months !== "0") {
+						subtitle = months + (months === "1" ? "-Month" : "-Months");
+					}
+				} else if (badge.startsWith('moderator/') || badge.startsWith('broadcaster/')) {
+					mod = true;
+				}
+			});
+		}
+		
+		// Apply member chat only filter if enabled
+		if (settings.memberchatonly && !subscriber) {
+			return;
+		}
+		
+		// Apply custom twitch state filter if enabled
+		if (channel && settings.customtwitchstate) {
+			if (settings.customtwitchaccount && settings.customtwitchaccount.textsetting && 
+				settings.customtwitchaccount.textsetting.toLowerCase() !== channel.toLowerCase()) {
+				return;
+			} else if (!settings.customtwitchaccount) {
+				return;
+			}
+		}
+		
+		// Apply delay if enabled
+		if (settings.delaytwitch) {
+			await new Promise(resolve => setTimeout(resolve, 3000));
+		}
+		
+		// Parse bits/cheers from message
+		let hasDonation = "";
+		if (parsedMessage.tags && parsedMessage.tags.bits) {
+			const bits = parseInt(parsedMessage.tags.bits);
+			if (bits === 1) {
+				hasDonation = bits + " bit";
+			} else if (bits > 1) {
+				hasDonation = bits + " bits";
+			}
+		}
+		
+		// Parse reply if enabled
+		let replyMessage = "";
+		let originalMessage = "";
+		if (settings.replyingto && parsedMessage.tags && parsedMessage.tags['reply-parent-msg-body']) {
+			replyMessage = parsedMessage.tags['reply-parent-msg-body'];
+			originalMessage = message;
+		}
 
 		// Add the message to the UI
 		var span = document.createElement("div");
-		span.innerText = `${(userInfo ? userInfo.display_name : user)}: ${message}`;
+		let badgeHtml = '';
+		badgeList.forEach(badgeUrl => {
+			badgeHtml += `<img class="chat-badge" src="${badgeUrl}" alt="">`;
+		});
+		
+		let displayMessage = escapeHtml(message);
+		if (replyMessage) {
+			displayMessage = `<i><small>${escapeHtml(replyMessage)}:</small></i> ${displayMessage}`;
+		}
+		
+		span.innerHTML = `${badgeHtml}${escapeHtml((userInfo ? userInfo.display_name : user))}: ${displayMessage}`;
 		document.querySelector("#textarea").appendChild(span);
 		if (document.querySelector("#textarea").childNodes.length > 10) {
 			document.querySelector("#textarea").childNodes[0].remove();
 		}
 
-		// Process badges before creating the data object
-		const badgeHTML = parseBadges(parsedMessage);
-
 		var data = {};
 		data.chatname = userInfo ? userInfo.display_name : user;
-		data.chatbadges = badgeHTML || "";  // Ensure badges are included
+		data.username = user;
+		
+		// Convert badge URLs to badge objects
+		data.chatbadges = badgeList.map(url => ({ type: "img", src: url }));
+		
 		data.backgroundColor = "";
-		data.textColor = userInfo ? userInfo.color : "";
-		data.chatmessage = replaceEmotesWithImages(message);
+		data.textColor = parsedMessage.tags?.color || "";
+		data.nameColor = parsedMessage.tags?.color || "";
+		
+		// Parse Twitch emotes from tags
+		let twitchEmotes = null;
+		if (parsedMessage.tags && parsedMessage.tags.emotes && typeof parsedMessage.tags.emotes === 'string' && parsedMessage.tags.emotes.trim() !== '') {
+			try {
+				twitchEmotes = {};
+				// Emotes format: "emote_id:start-end,start-end/emote_id:start-end"
+				const emoteParts = parsedMessage.tags.emotes.split('/');
+				emoteParts.forEach(part => {
+					if (!part) return;
+					const [emoteId, positions] = part.split(':');
+					if (emoteId && positions) {
+						twitchEmotes[emoteId] = positions.split(',').map(pos => {
+							const [start, end] = pos.split('-');
+							return { start, end };
+						});
+					}
+				});
+			} catch (e) {
+				console.error('Error parsing Twitch emotes:', e);
+				twitchEmotes = null;
+			}
+		}
+		
+		// Check if this is a bit message
+		const isBitMessage = !!(parsedMessage.tags && parsedMessage.tags.bits);
+		
+		// Debug logging for bit messages
+		if (isBitMessage) {
+			console.log("Bit message detected!");
+			console.log("Original message:", message);
+			console.log("Bit amount:", parsedMessage.tags.bits);
+			console.log("Emotes in message:", parsedMessage.tags.emotes);
+		}
+		
+		// Handle reply messages
+		if (replyMessage) {
+			data.initial = replyMessage;
+			data.reply = originalMessage;
+			if (settings.textonlymode) {
+				data.chatmessage = replyMessage + ": " + replaceEmotesWithImages(message, twitchEmotes, isBitMessage);
+			} else {
+				data.chatmessage = "<i><small>" + escapeHtml(replyMessage) + ":&nbsp;</small></i> " + replaceEmotesWithImages(message, twitchEmotes, isBitMessage);
+			}
+		} else {
+			data.chatmessage = replaceEmotesWithImages(message, twitchEmotes, isBitMessage);
+		}
+		
+		data.membership = subscriber;
+		data.subtitle = subtitle;
+		data.mod = mod;
 
 		try {
 			data.chatimg = userInfo ? userInfo.profile_image_url : "https://api.socialstream.ninja/twitch/?username=" + encodeURIComponent(user);
 		} catch (e) {
 			data.chatimg = "";
 		}
-		data.hasDonation = "";
-		data.membership = "";
+		data.hasDonation = hasDonation;
 		if (channel) {
 			data.sourceImg = getTwitchAvatarImage(channel);
+			data.sourceName = channel;
 		}
 		data.textonly = settings.textonlymode || false;
 		data.type = "twitch";
+		
+		if (hasDonation) {
+			data.title = "CHEERS";
+		}
+		
+		// Message ID for deduplication
+		if (parsedMessage.tags && parsedMessage.tags.id) {
+			data.id = parsedMessage.tags.id;
+		}
+		
 		} catch(e){
 			console.error(e);
-			
 		}
 		//console.log(data);
 		pushMessage(data);
 	}
 
+	function addEvent(description) {
+		const eventsList = document.getElementById('events-list');
+		if (!eventsList) return;
+		
+		const eventItem = document.createElement('div');
+		eventItem.className = 'event-item';
+		eventItem.textContent = description;
+		
+		// Add to top of list
+		eventsList.insertBefore(eventItem, eventsList.firstChild);
+		
+		// Keep only last 10 events
+		while (eventsList.children.length > 10) {
+			eventsList.removeChild(eventsList.lastChild);
+		}
+	}
+	
+	function processUserNotice(parsedMessage) {
+		// Handle various USERNOTICE types (raids, subs, etc)
+		const msgId = parsedMessage.tags['msg-id'];
+		const displayName = parsedMessage.tags['display-name'] || '';
+		const systemMsg = parsedMessage.tags['system-msg'] || '';
+		
+		let eventData = {
+			type: "twitch",
+			event: true,
+			textonly: settings.textonlymode || false
+		};
+		
+		switch(msgId) {
+			case 'raid':
+				const raidViewerCount = parsedMessage.tags['msg-param-viewerCount'] || '0';
+				eventData.chatmessage = systemMsg || `${displayName} is raiding with ${raidViewerCount} viewers!`;
+				eventData.event = 'raid';
+				addEvent(`Raid: ${displayName} with ${raidViewerCount} viewers`);
+				break;
+				
+			case 'sub':
+			case 'resub':
+				eventData.chatmessage = systemMsg;
+				eventData.event = msgId === 'sub' ? 'new_subscriber' : 'resub';
+				if (parsedMessage.trailing) {
+					eventData.chatmessage += " - " + parsedMessage.trailing;
+				}
+				addEvent(`${msgId === 'sub' ? 'Subscribe' : 'Resub'}: ${displayName}`);
+				break;
+				
+			case 'subgift':
+				eventData.chatmessage = systemMsg;
+				eventData.event = 'subscription_gift';
+				addEvent(`Gift Sub: ${displayName}`);
+				break;
+				
+			default:
+				// Generic event message
+				eventData.chatmessage = systemMsg || parsedMessage.trailing || '';
+				eventData.event = msgId || 'notification';
+				if (msgId) {
+					addEvent(`${msgId}: ${displayName}`);
+				}
+		}
+		
+		eventData.chatname = displayName;
+		
+		// Add to UI
+		if (eventData.chatmessage) {
+			var span = document.createElement("div");
+			span.style.fontStyle = "italic";
+			span.innerHTML = escapeHtml(eventData.chatmessage);
+			document.querySelector("#textarea").appendChild(span);
+			if (document.querySelector("#textarea").childNodes.length > 10) {
+				document.querySelector("#textarea").childNodes[0].remove();
+			}
+			
+			pushMessage(eventData);
+		}
+	}
+	
 	function updateStats(type, data) {
 		switch(type) {
 			case 'viewer_update':
@@ -1002,13 +1413,13 @@ try{
 	
 	function parseBadges(parsedMessage) {
 		// Early return if no valid badges data
-		if (!parsedMessage?.tags?.badges || typeof parsedMessage.tags.badges !== 'string' || !globalBadges || !channelBadges) {
-			return "";
+		if (!parsedMessage?.tags?.badges || typeof parsedMessage.tags.badges !== 'string') {
+			return [];
 		}
 
 		// Skip empty badge strings
 		if (parsedMessage.tags.badges.trim() === '') {
-			return "";
+			return [];
 		}
 
 		try {
@@ -1023,18 +1434,20 @@ try{
 				if (!badgeType || !badgeVersion) return;
 
 				// Check channel badges first, then fall back to global badges
-				const badgeData = (channelBadges?.[badgeType]?.[badgeVersion]) || 
-								(globalBadges?.[badgeType]?.[badgeVersion]);
-				
-				if (badgeData) {
-					badgeList.push(badgeData.image_url_2x);
+				if (globalBadges && channelBadges) {
+					const badgeData = (channelBadges?.[badgeType]?.[badgeVersion]) || 
+									(globalBadges?.[badgeType]?.[badgeVersion]);
+					
+					if (badgeData && badgeData.image_url_2x) {
+						badgeList.push(badgeData.image_url_2x);
+					}
 				}
 			});
 
 			return badgeList;
 		} catch (error) {
 			console.error('Error parsing badges:', error);
-			return "";
+			return [];
 		}
 	}
 
@@ -1054,6 +1467,10 @@ try{
 
 	function pushMessage(data) {
 		try {
+			// Show viewer count updates if enabled
+			if (data.event === 'viewer_update' && !(settings.showviewercount || settings.hypemode)) {
+				return; // Skip viewer updates if not enabled
+			}
 			
 			if (data.type && data.event) {
 				updateStats(data.event, data);
@@ -1116,6 +1533,9 @@ try{
 		const token = getStoredToken();
 		if (!token) return;
 		
+		// Clean channel name (remove # if present)
+		channelName = channelName.replace(/^#/, '');
+		
 		try {
 			const response = await fetchWithTimeout(
 				`https://api.twitch.tv/helix/streams?user_login=${channelName}`,
@@ -1130,19 +1550,17 @@ try{
 			console.log(data);
 			if (data.data && data.data[0]) {
 				const currentViewers = data.data[0].viewer_count;
-				if (currentViewers !== lastKnownViewers) {
-					lastKnownViewers = currentViewers;
-					console.log({
-						type: 'twitch',
-						event: 'viewer_update',
-						meta: lastKnownViewers
-					});
-					pushMessage({
-						type: 'twitch',
-						event: 'viewer_update',
-						meta: lastKnownViewers
-					});
-				}
+				lastKnownViewers = currentViewers;
+				console.log({
+					type: 'twitch',
+					event: 'viewer_update',
+					meta: lastKnownViewers
+				});
+				pushMessage({
+					type: 'twitch',
+					event: 'viewer_update',
+					meta: lastKnownViewers
+				});
 			}
 		} catch (error) {
 			console.error('Error fetching viewer count:', error);
@@ -1209,6 +1627,10 @@ try{
 		if (getFollowersInterval) {
 			clearInterval(getFollowersInterval);
 			getFollowersInterval = null;
+		}
+		if (tokenValidationInterval) {
+			clearInterval(tokenValidationInterval);
+			tokenValidationInterval = null;
 		}
 
 		// Close WebSocket connections
@@ -1361,6 +1783,18 @@ try{
 				}
 			}
 
+			// Resubscription message (months, streak)
+			if (permissions.canViewSubscribers && permissions.hasSubscriptionProgram && !activeSubscriptions.has('channel.subscription.message')) {
+				subscriptionTypes.push({
+					type: 'channel.subscription.message',
+					version: '1',
+					condition: {
+						broadcaster_user_id: broadcasterId
+					}
+				});
+			}
+
+			// Cheering
 			if ((permissions.isBroadcaster || permissions.isModerator) && !activeSubscriptions.has('channel.cheer')) {
 				subscriptionTypes.push({
 					type: 'channel.cheer',
@@ -1368,6 +1802,48 @@ try{
 					condition: {
 						broadcaster_user_id: broadcasterId
 					}
+				});
+			}
+
+			// Channel points redemptions
+			if (!activeSubscriptions.has('channel.channel_points_custom_reward_redemption.add')) {
+				subscriptionTypes.push({
+					type: 'channel.channel_points_custom_reward_redemption.add',
+					version: '1',
+					condition: {
+						broadcaster_user_id: broadcasterId
+					}
+				});
+			}
+
+			// Raids to this channel
+			if (!activeSubscriptions.has('channel.raid')) {
+				subscriptionTypes.push({
+					type: 'channel.raid',
+					version: '1',
+					condition: {
+						to_broadcaster_user_id: broadcasterId
+					}
+				});
+			}
+
+			// Stream status
+			for (const t of ['stream.online', 'stream.offline']) {
+				if (!activeSubscriptions.has(t)) {
+					subscriptionTypes.push({
+						type: t,
+						version: '1',
+						condition: { broadcaster_user_id: broadcasterId }
+					});
+				}
+			}
+
+			// Ad break begin
+			if (!activeSubscriptions.has('channel.ad_break.begin')) {
+				subscriptionTypes.push({
+					type: 'channel.ad_break.begin',
+					version: '1',
+					condition: { broadcaster_user_id: broadcasterId }
 				});
 			}
 
@@ -1424,6 +1900,11 @@ try{
 	function handleEventSubNotification(payload) {
 		const event = payload.event;
 		const subscription = payload.subscription;
+		
+		// Skip if captureevents is disabled
+		if (!settings.captureevents) {
+			return;
+		}
 
 		switch (subscription.type) {
 			case 'channel.follow':
@@ -1433,8 +1914,12 @@ try{
 					chatmessage: `${event.user_name} has started following`,
 					chatname: event.user_name,
 					userid: event.user_id,
-					timestamp: event.followed_at
+					timestamp: event.followed_at,
+					meta: { userId: event.user_id, followedAt: event.followed_at },
+					textonly: settings.textonlymode || false
 				});
+				// Add to recent events
+				addEvent(`Follow: ${event.user_name}`);
 				break;
 
 			case 'channel.subscribe':
@@ -1445,8 +1930,30 @@ try{
 					chatname: event.user_name,
 					userid: event.user_id,
 					tier: event.tier,
-					isGift: event.is_gift
+					isGift: event.is_gift,
+					meta: { userId: event.user_id, tier: event.tier, isGift: event.is_gift },
+					textonly: settings.textonlymode || false
 				});
+				// Add to recent events
+				addEvent(`Subscribe: ${event.user_name} (Tier ${event.tier})`);
+				break;
+
+			case 'channel.subscription.message':
+				pushMessage({
+					type: 'twitch',
+					event: 'resub',
+					chatname: event.user_name,
+					userid: event.user_id,
+					chatmessage: event.message?.text || `${event.user_name} resubscribed`,
+					meta: {
+						userId: event.user_id,
+						tier: event.tier,
+						streakMonths: event.streak_months,
+						cumulativeMonths: event.cumulative_months
+					},
+					textonly: settings.textonlymode || false
+				});
+				addEvent(`Resub: ${event.user_name} (${event.cumulative_months} months)`);
 				break;
 
 			case 'channel.subscription.gift':
@@ -1457,8 +1964,12 @@ try{
 					chatmessage: `${event.user_name} has gifted ${event.total} tier ${event.tier} subs!`,
 					userid: event.user_id,
 					total: event.total,
-					tier: event.tier
+					tier: event.tier,
+					meta: { userId: event.user_id, total: event.total, tier: event.tier },
+					textonly: settings.textonlymode || false
 				});
+				// Add to recent events
+				addEvent(`Gift Subs: ${event.user_name} gifted ${event.total} subs`);
 				break;
 
 			case 'channel.cheer':
@@ -1469,15 +1980,20 @@ try{
 					userid: event.user_id,
 					bits: event.bits,
 					chatmessage: event.message,
-					hasDonation: event.bits + " bits"
+					hasDonation: event.bits + " bits",
+					meta: { userId: event.user_id, bits: event.bits },
+					title: "CHEERS",
+					textonly: settings.textonlymode || false
 				});
+				// Add to recent events
+				addEvent(`Cheer: ${event.user_name || 'Anonymous'} cheered ${event.bits} bits`);
 				break;
 			case 'channel.channel_points_custom_reward_redemption.add':
-				const rewardTitle = data.reward.title;
-				const rewardCost = data.reward.cost;
-				const userInput = data.user_input || '';
+				const rewardTitle = event.reward.title;
+				const rewardCost = event.reward.cost;
+				const userInput = event.user_input || '';
 				
-				let rewardMessage = `${data.user_name} redeemed ${rewardTitle} (${rewardCost} points)`;
+				let rewardMessage = `${event.user_name} redeemed ${rewardTitle} (${rewardCost} points)`;
 				if (userInput) {
 					rewardMessage += `: ${userInput}`;
 				}
@@ -1485,26 +2001,149 @@ try{
 				pushMessage({
 					type: "twitch",
 					event: 'channel_points',
-					chatname: data.user_name,
-					userid: data.user_id,
+					chatname: event.user_name,
+					userid: event.user_id,
 					chatmessage: rewardMessage,
 					reward: {
-						id: data.reward.id,
+						id: event.reward.id,
 						title: rewardTitle,
 						cost: rewardCost,
-						prompt: data.reward.prompt,
+						prompt: event.reward.prompt,
 						userInput: userInput,
-						backgroundColor: data.reward.background_color,
-						redemptionId: data.id,
-						status: data.status
+						backgroundColor: event.reward.background_color,
+						redemptionId: event.id,
+						status: event.status
 					},
-					timestamp: data.redeemed_at
+					timestamp: event.redeemed_at,
+					meta: {
+						userId: event.user_id,
+						rewardId: event.reward.id,
+						cost: rewardCost,
+						alias: 'reward'
+					},
+					textonly: settings.textonlymode || false
 				});
 				
 				// Add to recent events
-				addEvent(`Channel Points: ${data.user_name} redeemed ${rewardTitle}`);
+				addEvent(`Channel Points: ${event.user_name} redeemed ${rewardTitle}`);
+				break;
+
+			case 'channel.raid':
+				pushMessage({
+					type: 'twitch',
+					event: 'raid',
+					chatname: event.from_broadcaster_user_name,
+					userid: event.from_broadcaster_user_id,
+					chatmessage: `Raiding with ${event.viewers} viewers!`,
+					meta: {
+						fromId: event.from_broadcaster_user_id,
+						fromLogin: event.from_broadcaster_user_login,
+						viewers: event.viewers
+					},
+					textonly: settings.textonlymode || false
+				});
+				addEvent(`Raid: ${event.from_broadcaster_user_name} with ${event.viewers} viewers`);
+				break;
+
+			case 'stream.online':
+				pushMessage({ type: 'twitch', event: 'stream_online', meta: { startedAt: event.started_at } });
+				addEvent('Stream Online');
+				break;
+			case 'stream.offline':
+				pushMessage({ type: 'twitch', event: 'stream_offline', meta: {} });
+				addEvent('Stream Offline');
+				break;
+
+			case 'channel.ad_break.begin':
+				pushMessage({
+					type: 'twitch',
+					event: 'ad_break',
+					chatmessage: `Ad break started (${event.duration_seconds}s)`,
+					meta: {
+						duration: event.duration_seconds,
+						isAutomatic: event.is_automatic,
+						requester: event.requester_login
+					}
+				});
+				addEvent(`Ad Break: ${event.duration_seconds}s`);
 				break;
 		}
+	}
+
+	// --- Moderation & Ads (stubs + API wiring) ---
+	async function getUserIdByLogin(login) {
+		const info = await getUserInfo(login);
+		return info?.id || null;
+	}
+
+	async function banUser(login, duration = 0, reason = '') {
+		try {
+			const token = getStoredToken();
+			if (!token || !currentChannelId) return false;
+			const moderator = await validateToken(token);
+			const userId = await getUserIdByLogin(login);
+			if (!userId) return false;
+			const res = await fetch(`https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${currentChannelId}&moderator_id=${moderator.user_id}`,
+				{
+					method: 'POST',
+					headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+					body: JSON.stringify({ data: { user_id: userId, duration: duration || undefined, reason: reason || undefined } })
+				}
+			);
+			return res.ok;
+		} catch(e) { console.error('banUser error', e); return false; }
+	}
+
+	async function unbanUser(login) {
+		try {
+			const token = getStoredToken();
+			if (!token || !currentChannelId) return false;
+			const moderator = await validateToken(token);
+			const userId = await getUserIdByLogin(login);
+			if (!userId) return false;
+			const res = await fetch(`https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${currentChannelId}&moderator_id=${moderator.user_id}&user_id=${userId}`,
+				{ method: 'DELETE', headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}` } }
+			);
+			return res.ok;
+		} catch(e) { console.error('unbanUser error', e); return false; }
+	}
+
+	async function startAdBreak(duration = 60) {
+		try {
+			const token = getStoredToken();
+			if (!token || !currentChannelId) return false;
+			const res = await fetch('https://api.twitch.tv/helix/channels/ads', {
+				method: 'POST',
+				headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ broadcaster_id: currentChannelId, length: duration })
+			});
+			const data = await res.json().catch(()=>({}));
+			if (res.ok) {
+				addEvent(`Ad Break requested: ${duration}s`);
+				pushMessage({ type: 'twitch', event: 'ad_request', meta: data?.data?.[0] || { length: duration } });
+				return true;
+			}
+			console.error('startAdBreak failed', data);
+			return false;
+		} catch(e) { console.error('startAdBreak error', e); return false; }
+	}
+
+	async function fetchAdSchedule() {
+		try {
+			const token = getStoredToken();
+			if (!token || !currentChannelId) return null;
+			const res = await fetch(`https://api.twitch.tv/helix/channels/ads?broadcaster_id=${currentChannelId}`, {
+				headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}` }
+			});
+			const data = await res.json();
+			if (res.ok) {
+				pushMessage({ type: 'twitch', event: 'ad_schedule', meta: data?.data?.[0] || data });
+				addEvent('Ad Schedule updated');
+				return data;
+			}
+			console.error('fetchAdSchedule failed', data);
+			return null;
+		} catch(e) { console.error('fetchAdSchedule error', e); return null; }
 	}
 
 
@@ -1560,17 +2199,22 @@ try{
 		const isBroadcaster = channelId === userId;
 		const isModerator = await getModeratorStatus(channelId, userId);
 		const broadcasterInfo = await getBroadcasterStatus(channelId);
+		const tokenInfo = await validateToken(getStoredToken());
+		const scopes = (tokenInfo?.scopes || []).reduce((acc, s) => { acc[s] = true; return acc; }, {});
 		
 		return {
 			isBroadcaster,
 			isModerator,
 			canViewFollowers: true, // Followers are public info
-			canManageChat: isBroadcaster || isModerator,
-			canBanUsers: isBroadcaster || isModerator,
-			canDeleteMessages: isBroadcaster || isModerator,
+			canManageChat: (isBroadcaster || isModerator) && (scopes['moderator:manage:chat_messages'] || isBroadcaster),
+			canBanUsers: (isBroadcaster || isModerator) && (scopes['moderator:manage:banned_users'] || isBroadcaster),
+			canDeleteMessages: (isBroadcaster || isModerator) && (scopes['moderator:manage:chat_messages'] || isBroadcaster),
 			canViewSubscribers: isBroadcaster || isModerator,
 			hasSubscriptionProgram: broadcasterInfo?.partner || broadcasterInfo?.broadcaster_type === 'affiliate',
 			canModerate: isBroadcaster || isModerator,
+			canManageAds: !!scopes['channel:manage:ads'],
+			canReadAds: !!scopes['channel:read:ads'],
+			canReadRedemptions: !!scopes['channel:read:redemptions'],
 			broadcasterType: broadcasterInfo?.broadcaster_type || 'none'
 		};
 	}
@@ -1615,6 +2259,9 @@ try{
 			{ name: 'Can Ban Users', value: permissions.canBanUsers ? '✓' : '✗' },
 			{ name: 'Can Delete Messages', value: permissions.canDeleteMessages ? '✓' : '✗' },
 			{ name: 'Can View Subscribers', value: permissions.canViewSubscribers ? '✓' : '✗' },
+			{ name: 'Can Manage Ads', value: permissions.canManageAds ? '✓' : '✗' },
+			{ name: 'Can Read Ads', value: permissions.canReadAds ? '✓' : '✗' },
+			{ name: 'Can Read Redemptions', value: permissions.canReadRedemptions ? '✓' : '✗' },
 			{ name: 'Channel Type', value: permissions.broadcasterType === 'none' ? 'Regular' : permissions.broadcasterType }
 		];
 
@@ -1645,3 +2292,126 @@ try{
 } catch(e){
 	console.error(e);
 }
+
+// --- APPEND-ONLY: Twitch WSS status hooks (non-invasive) ---
+(function(){
+  try {
+    if (window.__TWITCH_WSS_STATUS_PATCH__) return; // idempotent
+    window.__TWITCH_WSS_STATUS_PATCH__ = true;
+
+    var TAB_ID = (typeof window.__SSAPP_TAB_ID__ !== 'undefined') ? window.__SSAPP_TAB_ID__ : null;
+
+    function __tw_notifyApp(status, message){
+      try {
+        var payload = { wssStatus: { platform: 'twitch', status: status, message: message } };
+        if (window.chrome && window.chrome.runtime && window.chrome.runtime.id) {
+          window.chrome.runtime.sendMessage(window.chrome.runtime.id, payload, function(){});
+        } else if (window.ninjafy && window.ninjafy.sendMessage) {
+          window.ninjafy.sendMessage(null, payload, null, TAB_ID);
+        } else {
+          var data = Object.assign({}, payload);
+          if (TAB_ID !== null) data.__tabID__ = TAB_ID;
+          window.postMessage(data, '*');
+        }
+      } catch(e){}
+    }
+
+    // Expose for optional upstream use
+    window.ssWssNotifyTwitch = __tw_notifyApp;
+
+    // 1) Initial sign-in check
+    function __tw_initialCheck(){
+      try {
+        var hasToken = !!localStorage.getItem('twitchOAuthToken');
+        if (!hasToken) __tw_notifyApp('signin_required','Please sign in');
+      } catch(_){ }
+    }
+
+    // 2) Patch showAuthButton to emit signin_required whenever UI shows auth prompt
+    try {
+      if (typeof showAuthButton === 'function') {
+        var __tw_origShowAuth = showAuthButton;
+        showAuthButton = function(){
+          try { __tw_notifyApp('signin_required','Please sign in'); } catch(_){ }
+          return __tw_origShowAuth.apply(this, arguments);
+        };
+      }
+    } catch(_){ }
+
+    // 3) Watch WebSocket(s) for connected/disconnected
+    try {
+      var __tw_prevAnyOpen = false;
+      setInterval(function(){
+        try {
+          var ws = (typeof window.websocket !== 'undefined') ? window.websocket : null;
+          var ev = (typeof window.eventSocket !== 'undefined') ? window.eventSocket : null;
+          var isOpen = !!(ws && ws.readyState === 1);
+          var isEvOpen = !!(ev && ev.readyState === 1);
+          var anyOpen = isOpen || isEvOpen;
+          if (anyOpen && !__tw_prevAnyOpen) __tw_notifyApp('connected','Connected to Twitch');
+          if (!anyOpen && __tw_prevAnyOpen) __tw_notifyApp('disconnected','Disconnected from Twitch');
+          __tw_prevAnyOpen = anyOpen;
+        } catch(_){ }
+      }, 1500);
+    } catch(_){ }
+
+    // 4) Intercept Twitch API errors and forward as status updates
+    try {
+      if (!window.__tw_fetch_patched__) {
+        window.__tw_fetch_patched__ = true;
+        var _origFetch = window.fetch;
+        if (typeof _origFetch === 'function') {
+          var lastAt = 0;
+          var throttle = 3000;
+          var emit = function(status, msg){
+            var now = Date.now();
+            if (now - lastAt > throttle) {
+              __tw_notifyApp(status, msg);
+              lastAt = now;
+            }
+          };
+          window.fetch = async function(input, init){
+            try {
+              var res = await _origFetch(input, init);
+              var url = (typeof input === 'string') ? input : (input && input.url) || '';
+              if (url.indexOf('api.twitch.tv') !== -1 || url.indexOf('id.twitch.tv') !== -1 || url.indexOf('gql.twitch.tv') !== -1) {
+                if (!res.ok) {
+                  var msg = 'Twitch API ' + res.status;
+                  try {
+                    var body = await res.clone().json().catch(function(){ return null; });
+                    if (body) {
+                      if (body.message) msg = body.message; // Helix common
+                      if (body.error_description) msg = body.error_description; // OAuth common
+                      else if (body.error && typeof body.error === 'string') msg = body.error;
+                    }
+                  } catch(_){ }
+                  // Classification:
+                  // - OAuth (id.twitch.tv) 401 => auth expired / sign-in required
+                  // - Helix/GQL (api.twitch.tv / gql.twitch.tv) 401/403 => warn: insufficient scope/role
+                  // - Otherwise, generic error
+                  var isOAuth = url.indexOf('id.twitch.tv') !== -1;
+                  var isHelixOrGql = url.indexOf('api.twitch.tv') !== -1 || url.indexOf('gql.twitch.tv') !== -1;
+                  if (isOAuth && res.status === 401) {
+                    emit('signin_required', 'Twitch auth expired');
+                  } else if (isHelixOrGql && (res.status === 401 || res.status === 403)) {
+                    emit('warn', 'insufficient_scope');
+                  } else {
+                    emit('error', msg);
+                  }
+                }
+              }
+              return res;
+            } catch(e) {
+              emit('error', e && e.message ? e.message : 'Network error');
+              throw e;
+            }
+          };
+        }
+      }
+    } catch(_){ }
+
+    if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(__tw_initialCheck, 0);
+    else document.addEventListener('DOMContentLoaded', function(){ setTimeout(__tw_initialCheck, 0); });
+  } catch(e){}
+})();
+// --- END APPEND-ONLY BLOCK ---

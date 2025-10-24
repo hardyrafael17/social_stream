@@ -10,6 +10,10 @@
 </head>
 <body>
     <div class="container">
+        <div id="quota-warning" class="quota-warning hidden">
+            <span id="quota-warning-text">We've hit the default YouTube API quota. You can use your own Google API project to continue without interruptions.</span>
+            <button id="quota-open-credentials" class="auth-button" style="background:#fbbc05;color:#202124;">Set Up My Credentials</button>
+        </div>
         <div class="main-content">
             <div class="auth">
                 <div class="landing-container">
@@ -17,14 +21,42 @@
                     <h1 class="landing-title">Social Stream for YouTube</h1>
                     <p class="landing-subtitle">Connect to YouTube Live Chat</p>
                     
-                    <div class="auth-section">
-                        <a id="auth-link" class="auth-button">Sign in with YouTube</a>
-                    </div>
+            <div class="auth-section">
+                <a id="auth-link" class="auth-button">Sign in with YouTube</a>
+                <div id="custom-cred-indicator" class="custom-cred-indicator hidden">Using custom OAuth Client ID</div>
+            </div>
                     
                     <div class="landing-description">
                         <p>This tool requires OAuth sign-in to access YouTube's data APIs.</p>
                         <p><strong>Note:</strong> Events related to subscriptions, memberships, and followers are only available for your own channel. Chat functionality will work across most public channels.</p>
                     </div>
+
+                    <details id="credentials-details" class="credentials-details">
+                        <summary>Advanced: Use your own Google API credentials</summary>
+                        <div class="credentials-form">
+                            <label for="custom-client-id">OAuth Client ID</label>
+                            <input id="custom-client-id" type="text" placeholder="xxxx.apps.googleusercontent.com" />
+                            <label for="custom-api-key">API Key (optional)</label>
+                            <input id="custom-api-key" type="text" placeholder="AIza... (optional)" />
+                            <div class="credentials-actions">
+                                <button id="save-credentials" class="connect-button" style="background:#1a73e8;">Save</button>
+                                <button id="clear-credentials" class="connect-button" style="background:#5f6368;">Reset to default</button>
+                            </div>
+                            <div class="credentials-help">
+                                <p><strong>How to set up in Google Cloud:</strong></p>
+                                <ul>
+                                    <li>Create or select a project at console.cloud.google.com</li>
+                                    <li>Enable the “YouTube Data API v3” in APIs & Services</li>
+                                    <li>Configure OAuth consent screen (External), add yourself as a test user or publish</li>
+                                    <li>Create Credentials → OAuth client ID → Web application</li>
+                                    <li>Add the following to Authorized redirect URIs:</li>
+                                </ul>
+                                <code id="redirect-uri-hint"></code>
+                                <p>Save and copy your Client ID (ends with .apps.googleusercontent.com) into the field above. API Key is optional.</p>
+                                <p>After saving, sign out and sign in again to use your credentials.</p>
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
             
@@ -91,6 +123,24 @@
 
         <div class="sidebar hidden socket">
             <div class="permissions-container" id="permissions-info"></div>
+            <div class="credentials-container" id="credentials-container-signedin">
+                <div class="permissions-header">Use Your Own Credentials</div>
+                <div class="credentials-form inline">
+                    <label for="custom-client-id-2">OAuth Client ID</label>
+                    <input id="custom-client-id-2" type="text" placeholder="xxxx.apps.googleusercontent.com" />
+                    <label for="custom-api-key-2">API Key (optional)</label>
+                    <input id="custom-api-key-2" type="text" placeholder="AIza... (optional)" />
+                    <div class="credentials-actions">
+                        <button id="save-credentials-2" class="connect-button" style="background:#1a73e8;">Save</button>
+                        <button id="clear-credentials-2" class="connect-button" style="background:#5f6368;">Reset</button>
+                    </div>
+                    <div class="credentials-note">Changes take effect next sign-in. Use Reset to return to defaults.</div>
+                    <div class="credentials-help" style="margin-top:8px;">
+                        <p><strong>Setup steps:</strong> Enable “YouTube Data API v3”, configure OAuth consent, create a Web Application OAuth client, and add this Authorized redirect URI:</p>
+                        <code id="redirect-uri-hint-2"></code>
+                    </div>
+                </div>
+            </div>
             <div class="recent-events">
                 <h4>Recent Events</h4>
                 <div id="events-list"></div>
@@ -110,9 +160,39 @@
 
 
 try {
+    /*
+     * YouTube API Integration Note:
+     * This integration uses the YouTube Data API which has limitations compared to scraping the live chat directly.
+     * 
+     * Key Limitations:
+     * - Badge images (member badges, moderator badges, etc.) are not available through the API
+     * - We use text emoji fallbacks: 👑 (owner), 🛡️ (moderator), ⭐ (member)
+     * - Channel-specific emotes (like :_ted2:, :_ted:, etc.) are not available through the API
+     * - Super sticker images are not available, only the alt text description
+     * - For actual badge images, custom emotes, and sticker images, use the YouTube scraping mode in Social Stream instead
+     * 
+     * The badge format matches youtube.js for consistency:
+     * {"type": "img", "src": badgeUrl} when images are available
+     * {"type": "text", "text": emoji} as fallback
+     */
+    
     var clientId = '689627108309-isbjas8fmbc7sucmbm7gkqjapk7btbsi.apps.googleusercontent.com';
+    var apiKeyOverride = '';
+    try {
+        // Allow overrides via localStorage or URL for advanced users
+        const storedId = localStorage.getItem('ytClientIdOverride');
+        const storedKey = localStorage.getItem('ytApiKeyOverride');
+        const qp = new URLSearchParams(window.location.search);
+        const hp = new URLSearchParams(window.location.hash.slice(1));
+        const urlClient = qp.get('client_id') || hp.get('client_id');
+        const urlKey = qp.get('api_key') || hp.get('api_key');
+        if (storedId) clientId = storedId;
+        if (storedKey) apiKeyOverride = storedKey;
+        if (urlClient) { clientId = urlClient; }
+        if (urlKey) { apiKeyOverride = urlKey; }
+    } catch {}
     var redirectURI = window.location.href.split("/youtube")[0]+"/youtube.html";
-    var scope = 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.force-ssl';
+    var scope = 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube.channel-memberships.creator';
     var username = "";
     var channel = '';
     var videoId = '';
@@ -138,7 +218,6 @@ try {
 		console.log('Slower polling mode enabled (1.5x slower)');
 	}
 	
-	slowerPollingMode = true; // temporary
 	var consecutiveMaxMessages = 0; // Track consecutive polls with max messages
 	
 	var initialBacklogProcessing = true;
@@ -460,7 +539,9 @@ try {
 					  `/${baseCode}_${skinToneCode}/`
 					);
 					
-					return `<img class="regular-emote" src="${combinedUrl}" alt="${match}" title="${match}" />`;
+					// Properly escape the match for HTML attributes
+					const escapedMatch = match.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+					return `<img class="regular-emote" src="${combinedUrl}" alt="${escapedMatch}" title="${escapedMatch}" />`;
 				  }
 				}
 				
@@ -474,7 +555,9 @@ try {
 			// Then handle remaining standalone Unicode emoji characters
 			for (const [unicodeChar, emojiInfo] of unicodeMap.entries()) {
 			  if (result.includes(unicodeChar)) {
-				const imgTag = `<img src="${emojiInfo.url}" alt="${unicodeChar}" class="chat-emoji" title="${unicodeChar}" />`;
+				// Properly escape the unicode character for HTML attributes
+				const escapedChar = unicodeChar.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+				const imgTag = `<img src="${emojiInfo.url}" alt="${escapedChar}" class="chat-emoji" title="${escapedChar}" />`;
 				result = result.replace(new RegExp(unicodeChar, 'g'), imgTag);
 			  }
 			}
@@ -626,9 +709,10 @@ try {
 					// Check if it's a quota error
 					try {
 						const errorData = await response.json();
-						if (errorData.error && errorData.error.errors && errorData.error.errors[0].reason === 'quotaExceeded') {
-							console.error('YouTube API quota exceeded');
-							isPolling = false;
+							if (errorData.error && errorData.error.errors && errorData.error.errors[0].reason === 'quotaExceeded') {
+								console.error('YouTube API quota exceeded');
+								showQuotaBanner();
+								isPolling = false;
 							// Show quota error in chat with alternative
 							const textarea = document.querySelector("#textarea");
 							if (textarea) {
@@ -652,6 +736,7 @@ try {
 					return;
 				} else if (status === 429) {
 					console.warn('Rate limited by YouTube API');
+					showQuotaBanner();
 					isPolling = false;
 					// Use exponential backoff for rate limits
 					const backoffTime = Math.min(60000 * Math.pow(2, quickPollCount), 300000); // Max 5 minutes
@@ -687,10 +772,17 @@ try {
 					if (!lastMessageTime || publishedAt > lastMessageTime) {
 						const isBacklogMessage = initialBacklogProcessing && (messageTime <= initialBacklogTimestamp);
 						
-						// Process regular messages
-						if (!isBacklogMessage) {
+						// Check if this is a special event type that should not be processed as a regular message
+						const isSpecialEvent = item.snippet.type === 'giftMembershipReceivedEvent' ||
+											  item.snippet.type === 'newSponsorEvent' ||
+											  item.snippet.type === 'membershipGiftingEvent' ||
+											  item.snippet.type === 'memberMilestoneChatEvent' ||
+											  item.snippet.type === 'superStickerEvent';
+						
+						// Process regular messages (skip if it's a special event)
+						if (!isBacklogMessage && !isSpecialEvent) {
 							queueMessage({
-								authorName: item.authorDetails.displayName,
+								authorName: item.authorDetails.displayName.replace(/^@/, ''),
 								message: item.snippet.displayMessage || item.snippet.textMessageDetails?.messageText || '',
 								profileImageUrl: item.authorDetails.profileImageUrl,
 								isChatOwner: item.authorDetails.isChatOwner,
@@ -698,28 +790,147 @@ try {
 								isChatModerator: item.authorDetails.isChatModerator,
 								authorChannelId: item.authorDetails.channelId,
 								publishedAt,
-								skipEvent: isBacklogMessage
+								skipEvent: isBacklogMessage,
+								isMembershipMessage: false // Regular messages are not membership messages
 							});
 						}
 						
 						// Process special message types
+						
+						// Handle gift membership received events
+						if (item.snippet.type === 'giftMembershipReceivedEvent' && item.snippet.giftMembershipReceivedDetails) {
+							const giftDetails = item.snippet.giftMembershipReceivedDetails;
+							if (!isBacklogMessage) {
+								processGiftRedemption({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									gifterChannelId: giftDetails.gifterChannelId,
+									memberLevelName: giftDetails.memberLevelName,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									displayMessage: item.snippet.displayMessage
+								});
+							}
+						}
+						
+						// Handle new sponsor events (new memberships)
+						if (item.snippet.type === 'newSponsorEvent' && item.snippet.newSponsorDetails) {
+							if (!isBacklogMessage) {
+								processNewSponsorship({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									memberLevelName: item.snippet.newSponsorDetails.memberLevelName,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									displayMessage: item.snippet.displayMessage
+								});
+							}
+						}
+						
+						// Handle membership gift purchase events
+						if (item.snippet.type === 'membershipGiftingEvent' && item.snippet.membershipGiftingDetails) {
+							const giftingDetails = item.snippet.membershipGiftingDetails;
+							if (!isBacklogMessage) {
+								processGiftPurchase({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									giftCount: giftingDetails.giftMembershipsCount || 1,
+									memberLevelName: giftingDetails.giftMembershipsLevelName,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									displayMessage: item.snippet.displayMessage
+								});
+							}
+						}
+						
+						// Handle member milestone events
+						if (item.snippet.type === 'memberMilestoneChatEvent' && item.snippet.memberMilestoneChatDetails) {
+							const milestoneDetails = item.snippet.memberMilestoneChatDetails;
+							if (!isBacklogMessage) {
+								processMemberMilestone({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									memberMonth: milestoneDetails.memberMonth,
+									memberLevelName: milestoneDetails.memberLevelName,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									displayMessage: item.snippet.displayMessage,
+									isChatOwner: item.authorDetails.isChatOwner,
+									isChatModerator: item.authorDetails.isChatModerator,
+									isChatSponsor: item.authorDetails.isChatSponsor
+								});
+							}
+						}
+						
+						// Handle super sticker events
+						if (item.snippet.type === 'superStickerEvent' && item.snippet.superStickerDetails) {
+							const stickerDetails = item.snippet.superStickerDetails;
+							if (!isBacklogMessage) {
+								// Build badges for super sticker author
+								let stickerBadges = [];
+								if (item.authorDetails.isChatOwner) stickerBadges.push({"type": "text", "text": "👑"});
+								if (item.authorDetails.isChatModerator) stickerBadges.push({"type": "text", "text": "🛡️"});
+								if (item.authorDetails.isChatSponsor) stickerBadges.push({"type": "text", "text": "⭐"});
+								
+								processSuperSticker({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''), // Remove @ prefix if present
+									amount: stickerDetails.amountDisplayString,
+									stickerId: stickerDetails.superStickerMetadata?.stickerId,
+									altText: stickerDetails.superStickerMetadata?.altText,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									badges: stickerBadges.length > 0 ? stickerBadges : "",
+									displayMessage: item.snippet.displayMessage
+								});
+							}
+						}
+						
 						if (item.snippet.superChatDetails) {
+							// Build badges for super chat author
+							let superChatBadges = [];
+							if (item.authorDetails.isChatOwner) superChatBadges.push({"type": "text", "text": "👑"});
+							if (item.authorDetails.isChatModerator) superChatBadges.push({"type": "text", "text": "🛡️"});
+							if (item.authorDetails.isChatSponsor) superChatBadges.push({"type": "text", "text": "⭐"});
+							
 							processSuperChat({
-								authorName: item.authorDetails.displayName,
+								authorName: item.authorDetails.displayName.replace(/^@/, ''),
 								amount: item.snippet.superChatDetails.amountDisplayString,
 								message: item.snippet.superChatDetails.userComment,
 								tier: item.snippet.superChatDetails.tier,
 								profileImageUrl: item.authorDetails.profileImageUrl,
-								authorChannelId: item.authorDetails.channelId
+								authorChannelId: item.authorDetails.channelId,
+								badges: superChatBadges.length > 0 ? superChatBadges : ""
 							});
 						}
 						if (item.snippet.membershipDetails) {
-							processMembership({
-								authorName: item.authorDetails.displayName,
-								level: item.snippet.membershipDetails.memberLevelName,
-								profileImageUrl: item.authorDetails.profileImageUrl,
-								authorChannelId: item.authorDetails.channelId
-							});
+							// Process membership events with the isMembershipMessage flag
+							const membershipMessage = item.snippet.displayMessage || '';
+							if (membershipMessage && !isBacklogMessage) {
+								// This is a monthly featured message from a member
+								queueMessage({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									message: membershipMessage,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									isChatOwner: item.authorDetails.isChatOwner,
+									isChatSponsor: item.authorDetails.isChatSponsor,
+									isChatModerator: item.authorDetails.isChatModerator,
+									authorChannelId: item.authorDetails.channelId,
+									publishedAt,
+									skipEvent: isBacklogMessage,
+									isMembershipMessage: true // This is a special membership message
+								});
+							} else {
+								// Build badges for membership author
+								let membershipBadges = [];
+								if (item.authorDetails.isChatOwner) membershipBadges.push({"type": "text", "text": "👑"});
+								if (item.authorDetails.isChatModerator) membershipBadges.push({"type": "text", "text": "🛡️"});
+								membershipBadges.push({"type": "text", "text": "⭐"}); // Always add member badge
+								
+								// New membership, renewal, or upgrade without a message
+								processMembership({
+									authorName: item.authorDetails.displayName.replace(/^@/, ''),
+									level: item.snippet.membershipDetails.memberLevelName,
+									profileImageUrl: item.authorDetails.profileImageUrl,
+									authorChannelId: item.authorDetails.channelId,
+									badges: membershipBadges
+								});
+							}
 						}
 						
 						// Update timestamp once for all message types
@@ -1383,10 +1594,14 @@ try {
 				const stats = data.items[0].statistics;
 				if (stats.subscriberCount) {
 					updateStats('subscriber_update', { meta: stats.subscriberCount });
-					pushMessage({ type: youtubeShorts ? "youtubeshorts" : "youtube", event: 'subscriber_update', meta: stats.subscriberCount });
+					if (settings.showsubscount !== false) { // Only skip if explicitly false
+						pushMessage({ type: youtubeShorts ? "youtubeshorts" : "youtube", event: 'subscriber_update', meta: stats.subscriberCount });
+					}
 				}
 				if (stats.viewCount) {
-					pushMessage({ type: youtubeShorts ? "youtubeshorts" : "youtube", event: 'view_update', meta: stats.viewCount });
+					if (settings.showviewcount || settings.hypemode) {
+						pushMessage({ type: youtubeShorts ? "youtubeshorts" : "youtube", event: 'view_update', meta: stats.viewCount });
+					}
 				}
 			}
 		} catch (error) {
@@ -1631,11 +1846,34 @@ try {
 
 	function processMessage(messageData) {
 		try {
-			let badgeText = '';
+			// Apply member chat only filter if enabled
+			if (settings.memberchatonly && !messageData.isChatSponsor && !messageData.membership && !messageData.event) {
+				return; // Skip non-member messages
+			}
 			
-			if (messageData.isChatOwner) { badgeText = "👑"; }
-			if (messageData.isChatModerator) { badgeText = "🛡️"; }
-			if (messageData.isChatSponsor) { badgeText = "⭐"; }
+			let chatbadges = [];
+			let nameColor = '';
+			
+			// Build badges array - order matters (owner > mod > member)
+			if (messageData.isChatOwner) { 
+				// Note: YouTube API doesn't provide badge images, using text emoji as fallback
+				chatbadges.push({"type": "text", "text": "👑"}); // Crown for owner
+			}
+			if (messageData.isChatModerator) { 
+				// Note: YouTube API doesn't provide badge images, using text emoji as fallback
+				chatbadges.push({"type": "text", "text": "🛡️"}); // Shield for moderator
+				if (!settings.nosubcolor) {
+					nameColor = "#5e84f1";
+				}
+			}
+			if (messageData.isChatSponsor) { 
+				// Note: YouTube API doesn't provide member badge images
+				// In the future, if we can get badge URLs, use: {"type": "img", "src": badgeUrl}
+				chatbadges.push({"type": "text", "text": "⭐"}); // Star for member/sponsor
+				if (!settings.nosubcolor && !nameColor) { // Don't override mod color
+					nameColor = "#107516";
+				}
+			}
 
 			//console.log("Processing message:", messageData.message, "EMOTELIST available:", !!EMOTELIST);
 			if (!messageData.message && messageData.message !== '') {
@@ -1650,6 +1888,7 @@ try {
 				if (textarea) {
 					var span = document.createElement("div");
 					let badgeHtml = '';
+					// Display badges in the same order as they're sent
 					if (messageData.isChatOwner) { badgeHtml += '<span class="chat-badge" title="Channel Owner">👑</span>'; }
 					if (messageData.isChatModerator) { badgeHtml += '<span class="chat-badge" title="Moderator">🛡️</span>'; }
 					if (messageData.isChatSponsor) { badgeHtml += '<span class="chat-badge" title="Member">⭐</span>'; }
@@ -1668,16 +1907,28 @@ try {
 				}
 			}
 			if (!messageData.skipEvent && messageWithEmojis) {
+				// Determine membership status based on settings
+				let membershipStatus = "";
+				if (messageData.isChatSponsor) {
+					// If limitedyoutubememberchat is enabled, only mark as member if it's a special membership message
+					if (!settings.limitedyoutubememberchat || messageData.isMembershipMessage) {
+						membershipStatus = "member";
+					}
+				}
+				
 				pushMessage({
 					chatname: messageData.authorName,
-					chatbadges: (badgeText ? [{"type":"text", "text": badgeText}] : ""),
+					chatbadges: chatbadges.length > 0 ? chatbadges : "",
 					userid: messageData.authorChannelId,
+					nameColor: nameColor,
 					backgroundColor: "",
 					textColor: "",
 					chatmessage: messageWithEmojis, // Use the version with emojis replaced
 					chatimg: messageData.profileImageUrl || "",
 					hasDonation: "",
-					membership: messageData.isChatSponsor ? "member" : "",
+					videoid: videoId,
+					membership: membershipStatus,
+					mod: messageData.isChatModerator || false,
 					type: youtubeShorts ? "youtubeshorts" : "youtube",
 					textonly: settings.textonlymode || false // Pass the setting to the extension
 				});
@@ -1711,7 +1962,7 @@ try {
 			}
 			pushMessage({
 				chatname: superChatData.authorName,
-				chatbadges: "",
+				chatbadges: superChatData.badges || "", // Use any badges passed in
 				userid: superChatData.authorChannelId,
 				backgroundColor: "",
 				textColor: "#111",
@@ -1720,7 +1971,8 @@ try {
 				hasDonation: superChatData.amount,
 				membership: "",
 				type: youtubeShorts ? "youtubeshorts" : "youtube",
-				event: "donation"
+				event: "donation",
+				textonly: settings.textonlymode || false
 			});
 		} catch (e) {
 			console.error('Error processing super chat:', e);
@@ -1729,14 +1981,27 @@ try {
 	
 	function processMembership(membershipData) {
 		try {
-			addEvent(`New Member: ${membershipData.authorName} - ${membershipData.level}`);
+			let eventType = membershipData.eventType || "new_member";
+			let displayMessage = '';
+			let nameColor = !settings.nosubcolor ? "#107516" : "";
+			
+			if (eventType === "renewal") {
+				displayMessage = `renewed membership (${membershipData.level})`;
+				addEvent(`Member Renewal: ${membershipData.authorName} - ${membershipData.level}`);
+			} else if (eventType === "upgrade") {
+				displayMessage = `upgraded membership to ${membershipData.level}`;
+				addEvent(`Member Upgrade: ${membershipData.authorName} - ${membershipData.level}`);
+			} else {
+				displayMessage = `joined as a member (${membershipData.level})`;
+				addEvent(`New Member: ${membershipData.authorName} - ${membershipData.level}`);
+			}
 			
 			// Only update DOM if page is visible
 			if (isPageVisible) {
 				const textarea = document.querySelector("#textarea");
 				if (textarea) {
 					var span = document.createElement("div");
-					span.innerHTML = `<strong>${escapeHtml(membershipData.authorName)}</strong> <span>joined as a member (${membershipData.level})</span>`;
+					span.innerHTML = `<strong>${escapeHtml(membershipData.authorName)}</strong> <span>${displayMessage}</span>`;
 					textarea.appendChild(span);
 					
 					// Use same cleanup limit as regular messages
@@ -1753,23 +2018,268 @@ try {
 			
 			pushMessage({
 				chatname: escapeHtml(membershipData.authorName),
-				chatbadges: [{"type":"text", "text": "⭐"}],
+				chatbadges: membershipData.badges || [{"type":"text", "text": "⭐"}], // Use passed badges or default to star
 				userid: membershipData.authorChannelId,
+				nameColor: nameColor,
 				backgroundColor: "",
 				textColor: "",
-				chatmessage: `joined as a member (${membershipData.level})`,
+				chatmessage: displayMessage,
 				chatimg: membershipData.profileImageUrl || "",
 				hasDonation: "",
-				membership: "new_member",
+				membership: eventType === "renewal" ? "renewed_member" : eventType === "upgrade" ? "upgraded_member" : "new_member",
 				subtitle: membershipData.level,
 				type: youtubeShorts ? "youtubeshorts" : "youtube",
-				event: "new_member",
+				event: eventType,
 				textonly: settings.textonlymode || false
 			});
 		} catch (e) {
 			console.error('Error processing membership:', e);
 		}
 	}
+	
+	function processGiftRedemption(giftData) {
+		try {
+			const displayMessage = giftData.displayMessage || `received a gift membership`;
+			addEvent(`Gift Redeemed: ${giftData.authorName} - ${giftData.memberLevelName}`);
+			
+			// Only update DOM if page is visible
+			if (isPageVisible) {
+				const textarea = document.querySelector("#textarea");
+				if (textarea) {
+					var span = document.createElement("div");
+					span.innerHTML = `<strong>${escapeHtml(giftData.authorName)}</strong> ${escapeHtml(displayMessage)}`;
+					textarea.appendChild(span);
+					// Use same cleanup limit as regular messages
+					const maxMessages = 50;
+					while (textarea.childNodes.length > maxMessages) {
+						textarea.removeChild(textarea.firstChild);
+					}
+					// Only auto-scroll if user is near bottom
+					if (textarea.scrollTop > textarea.scrollHeight - textarea.clientHeight - 100) {
+						textarea.scrollTop = textarea.scrollHeight;
+					}
+				}
+			}
+			
+			pushMessage({
+				chatname: escapeHtml(giftData.authorName),
+				chatbadges: [{"type": "text", "text": "🎁"}], // Gift emoji for received gifts
+				userid: giftData.authorChannelId,
+				nameColor: !settings.nosubcolor ? "#107516" : "",
+				backgroundColor: "",
+				textColor: "",
+				chatmessage: escapeHtml(displayMessage),
+				chatimg: giftData.profileImageUrl || "",
+				hasDonation: "",
+				membership: "gift_recipient",
+				subtitle: giftData.memberLevelName,
+				type: youtubeShorts ? "youtubeshorts" : "youtube",
+				event: "giftredemption",
+				textonly: settings.textonlymode || false
+			});
+		} catch (e) {
+			console.error('Error processing gift redemption:', e);
+		}
+	}
+	
+	function processGiftPurchase(giftData) {
+		try {
+			const giftCount = giftData.giftCount || 1;
+			const displayMessage = giftData.displayMessage || `gifted ${giftCount} membership${giftCount > 1 ? 's' : ''} (${giftData.memberLevelName})`;
+			addEvent(`Gift Purchase: ${giftData.authorName} - ${giftCount} x ${giftData.memberLevelName}`);
+			
+			// Only update DOM if page is visible
+			if (isPageVisible) {
+				const textarea = document.querySelector("#textarea");
+				if (textarea) {
+					var span = document.createElement("div");
+					span.innerHTML = `<strong>${escapeHtml(giftData.authorName)}</strong> ${escapeHtml(displayMessage)}`;
+					textarea.appendChild(span);
+					// Use same cleanup limit as regular messages
+					const maxMessages = 50;
+					while (textarea.childNodes.length > maxMessages) {
+						textarea.removeChild(textarea.firstChild);
+					}
+					// Only auto-scroll if user is near bottom
+					if (textarea.scrollTop > textarea.scrollHeight - textarea.clientHeight - 100) {
+						textarea.scrollTop = textarea.scrollHeight;
+					}
+				}
+			}
+			
+			pushMessage({
+				chatname: escapeHtml(giftData.authorName),
+				chatbadges: [{"type": "text", "text": "💝"}], // Gift giving emoji
+				userid: giftData.authorChannelId,
+				nameColor: "",
+				backgroundColor: "",
+				textColor: "",
+				chatmessage: escapeHtml(displayMessage),
+				chatimg: giftData.profileImageUrl || "",
+				hasDonation: "",
+				membership: "gift_giver",
+				subtitle: `${giftCount} x ${giftData.memberLevelName}`,
+				type: youtubeShorts ? "youtubeshorts" : "youtube",
+				event: "giftpurchase",
+				textonly: settings.textonlymode || false
+			});
+		} catch (e) {
+			console.error('Error processing gift purchase:', e);
+		}
+	}
+	
+	function processNewSponsorship(sponsorData) {
+		try {
+			const displayMessage = sponsorData.displayMessage || `just became a member!`;
+			addEvent(`New Sponsor: ${sponsorData.authorName} - ${sponsorData.memberLevelName}`);
+			
+			// Only update DOM if page is visible
+			if (isPageVisible) {
+				const textarea = document.querySelector("#textarea");
+				if (textarea) {
+					var span = document.createElement("div");
+					span.innerHTML = `<strong>${escapeHtml(sponsorData.authorName)}</strong> ${escapeHtml(displayMessage)}`;
+					textarea.appendChild(span);
+					// Use same cleanup limit as regular messages
+					const maxMessages = 50;
+					while (textarea.childNodes.length > maxMessages) {
+						textarea.removeChild(textarea.firstChild);
+					}
+					// Only auto-scroll if user is near bottom
+					if (textarea.scrollTop > textarea.scrollHeight - textarea.clientHeight - 100) {
+						textarea.scrollTop = textarea.scrollHeight;
+					}
+				}
+			}
+			
+			pushMessage({
+				chatname: escapeHtml(sponsorData.authorName),
+				chatbadges: [{"type": "text", "text": "⭐"}], // Star for new members
+				userid: sponsorData.authorChannelId,
+				nameColor: !settings.nosubcolor ? "#107516" : "",
+				backgroundColor: "",
+				textColor: "",
+				chatmessage: escapeHtml(displayMessage),
+				chatimg: sponsorData.profileImageUrl || "",
+				hasDonation: "",
+				membership: "new_sponsor",
+				subtitle: sponsorData.memberLevelName,
+				type: youtubeShorts ? "youtubeshorts" : "youtube",
+				event: "sponsorship",
+				textonly: settings.textonlymode || false
+			});
+		} catch (e) {
+			console.error('Error processing new sponsorship:', e);
+		}
+	}
+	
+	function processMemberMilestone(milestoneData) {
+		try {
+			const displayMessage = milestoneData.displayMessage || `celebrates ${milestoneData.memberMonth} month${milestoneData.memberMonth > 1 ? 's' : ''} of membership`;
+			addEvent(`Member Milestone: ${milestoneData.authorName} - ${milestoneData.memberMonth} months`);
+			
+			// Build badges for milestone author
+			let milestoneBadges = [];
+			if (milestoneData.isChatOwner) milestoneBadges.push({"type": "text", "text": "👑"});
+			if (milestoneData.isChatModerator) milestoneBadges.push({"type": "text", "text": "🛡️"});
+			milestoneBadges.push({"type": "text", "text": "🏅"}); // Medal for milestone
+			
+			// Only update DOM if page is visible
+			if (isPageVisible) {
+				const textarea = document.querySelector("#textarea");
+				if (textarea) {
+					var span = document.createElement("div");
+					span.innerHTML = `<strong>${escapeHtml(milestoneData.authorName)}</strong> ${escapeHtml(displayMessage)}`;
+					textarea.appendChild(span);
+					// Use same cleanup limit as regular messages
+					const maxMessages = 50;
+					while (textarea.childNodes.length > maxMessages) {
+						textarea.removeChild(textarea.firstChild);
+					}
+					// Only auto-scroll if user is near bottom
+					if (textarea.scrollTop > textarea.scrollHeight - textarea.clientHeight - 100) {
+						textarea.scrollTop = textarea.scrollHeight;
+					}
+				}
+			}
+			
+			pushMessage({
+				chatname: escapeHtml(milestoneData.authorName),
+				chatbadges: milestoneBadges,
+				userid: milestoneData.authorChannelId,
+				nameColor: !settings.nosubcolor ? "#107516" : "",
+				backgroundColor: "",
+				textColor: "",
+				chatmessage: escapeHtml(displayMessage),
+				chatimg: milestoneData.profileImageUrl || "",
+				hasDonation: "",
+				membership: "member_milestone",
+				subtitle: `${milestoneData.memberMonth} months - ${milestoneData.memberLevelName}`,
+				type: youtubeShorts ? "youtubeshorts" : "youtube",
+				event: "membermilestone",
+				textonly: settings.textonlymode || false
+			});
+		} catch (e) {
+			console.error('Error processing member milestone:', e);
+		}
+	}
+	
+	function processSuperSticker(stickerData) {
+		try {
+			addEvent(`Super Sticker: ${stickerData.authorName} - ${stickerData.amount}`);
+			
+			// Extract the actual message from displayMessage
+			// Format is typically: "£10.00 from @username: "actual message""
+			let actualMessage = stickerData.displayMessage || '';
+			const messageMatch = actualMessage.match(/:\s*"(.+)"$/);
+			if (messageMatch) {
+				actualMessage = messageMatch[1];
+			}
+			
+			// Only update DOM if page is visible
+			if (isPageVisible) {
+				const textarea = document.querySelector("#textarea");
+				if (textarea) {
+					var span = document.createElement("div");
+					// Use the actual message or alt text for display
+					const stickerText = actualMessage || stickerData.altText || 'Super Sticker';
+					span.innerHTML = `<strong>${escapeHtml(stickerData.authorName)}</strong> <span>${stickerData.amount}</span>: 🎨 ${escapeHtml(stickerText)}`;
+					textarea.appendChild(span);
+					// Use same cleanup limit as regular messages
+					const maxMessages = 50;
+					while (textarea.childNodes.length > maxMessages) {
+						textarea.removeChild(textarea.firstChild);
+					}
+					// Only auto-scroll if user is near bottom
+					if (textarea.scrollTop > textarea.scrollHeight - textarea.clientHeight - 100) {
+						textarea.scrollTop = textarea.scrollHeight;
+					}
+				}
+			}
+			
+			// Note: YouTube API doesn't provide sticker image URLs
+			// In youtube.js, sticker images are captured from the rendered chat
+			const stickerMessage = actualMessage || stickerData.altText || 'Super Sticker';
+			
+			pushMessage({
+				chatname: escapeHtml(stickerData.authorName),
+				chatbadges: stickerData.badges || "",
+				userid: stickerData.authorChannelId,
+				backgroundColor: "",
+				textColor: "#111",
+				chatmessage: escapeHtml(stickerMessage), // Just the message, no emoji prefix
+				chatimg: stickerData.profileImageUrl || "",
+				hasDonation: stickerData.amount,
+				membership: "",
+				type: youtubeShorts ? "youtubeshorts" : "youtube",
+				event: "supersticker",
+				textonly: settings.textonlymode || false
+			});
+		} catch (e) {
+			console.error('Error processing super sticker:', e);
+		}
+	}
+	
 	function updateStats(type, data) {
 		switch(type) {
 			case 'viewer_update':
@@ -1843,6 +2353,8 @@ try {
 	}
 	
 	function initializePage() {
+		// Initialize credentials UI and indicators
+		initCredentialsUI();
 		
 		urlParams = new URLSearchParams(window.location.search);
 		hashParams = new URLSearchParams(window.location.hash.slice(1));
@@ -1891,6 +2403,18 @@ try {
 			};
 			authLink.addEventListener('click', authHandler);
 			registerCleanup(() => authLink.removeEventListener('click', authHandler));
+		}
+		const quotaBtn = document.getElementById('quota-open-credentials');
+		if (quotaBtn) {
+			const openCreds = function() {
+				const details = document.getElementById('credentials-details');
+				if (details) details.open = true;
+				const warn = document.getElementById('quota-warning');
+				if (warn) warn.classList.add('hidden');
+				window.scrollTo({ top: 0, behavior: 'smooth' });
+			};
+			quotaBtn.addEventListener('click', openCreds);
+			registerCleanup(() => quotaBtn.removeEventListener('click', openCreds));
 		}
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 		registerCleanup(() => document.removeEventListener('visibilitychange', handleVisibilityChange));
@@ -2014,8 +2538,23 @@ try {
 			clearTimeout(timeout_id);
 			//console.log('Response status:', response.status, response.statusText);
 			if (!response.ok) {
-				const errorText = await response.text();
-				console.error('API error response:', errorText);
+				// Try to parse error for quota/rate limit signals
+				let errorText = '';
+				let quotaHit = false;
+				try {
+					const cloned = response.clone();
+					const json = await cloned.json();
+					const reason = json?.error?.errors?.[0]?.reason || '';
+					const message = json?.error?.message || '';
+					errorText = JSON.stringify(json);
+					if (response.status === 403 || response.status === 429) {
+						if (/quota|rateLimit|dailyLimit/i.test(reason) || /quota|rate/i.test(message)) quotaHit = true;
+					}
+				} catch(e) {
+					try { errorText = await response.text(); } catch(_) {}
+				}
+				if (quotaHit) showQuotaBanner();
+				console.error('API error response:', errorText || (response.status + ' ' + response.statusText));
 				throw new Error(`API error: ${response.status} ${response.statusText}`);
 			}
 			return response;
@@ -2031,6 +2570,64 @@ try {
 		} finally {
 			clearTimeout(timeout_id);
 		}
+	}
+
+	function showQuotaBanner() {
+		try {
+			const el = document.getElementById('quota-warning');
+			if (!el) return;
+			el.classList.remove('hidden');
+		} catch(_){}
+	}
+
+	function hideQuotaBanner() {
+		try {
+			const el = document.getElementById('quota-warning');
+			if (el) el.classList.add('hidden');
+		} catch(_){}
+	}
+
+	function initCredentialsUI() {
+		try {
+			const redirectValue = window.location.href.split('/youtube')[0] + '/youtube.html';
+			const redirectEl = document.getElementById('redirect-uri-hint');
+			if (redirectEl) redirectEl.textContent = redirectValue;
+			const redirectEl2 = document.getElementById('redirect-uri-hint-2');
+			if (redirectEl2) redirectEl2.textContent = redirectValue;
+			const storedId = localStorage.getItem('ytClientIdOverride') || '';
+			const storedKey = localStorage.getItem('ytApiKeyOverride') || '';
+			const useCustom = !!storedId;
+			// Populate both forms
+			['custom-client-id','custom-client-id-2'].forEach(id => { const i = document.getElementById(id); if (i) i.value = storedId; });
+			['custom-api-key','custom-api-key-2'].forEach(id => { const i = document.getElementById(id); if (i) i.value = storedKey; });
+			const indicator = document.getElementById('custom-cred-indicator');
+			if (indicator) indicator.classList.toggle('hidden', !useCustom);
+			if (useCustom) hideQuotaBanner();
+			// Wire buttons
+			const save = async function(primary=true){
+				const cid = (document.getElementById(primary ? 'custom-client-id' : 'custom-client-id-2')||{}).value || '';
+				const akey = (document.getElementById(primary ? 'custom-api-key' : 'custom-api-key-2')||{}).value || '';
+				if (cid && !/\.apps\.googleusercontent\.com$/.test(cid)) {
+					alert('That OAuth Client ID does not look valid. It should end with .apps.googleusercontent.com');
+					return;
+				}
+				if (cid) localStorage.setItem('ytClientIdOverride', cid); else localStorage.removeItem('ytClientIdOverride');
+				if (akey) localStorage.setItem('ytApiKeyOverride', akey); else localStorage.removeItem('ytApiKeyOverride');
+				alert('Saved. Please sign out and sign in again to apply your credentials.');
+				hideQuotaBanner();
+				initCredentialsUI();
+			};
+			const clear = function(){
+				localStorage.removeItem('ytClientIdOverride');
+				localStorage.removeItem('ytApiKeyOverride');
+				alert('Custom credentials cleared. Default project will be used.');
+				initCredentialsUI();
+			};
+			const s1 = document.getElementById('save-credentials'); if (s1) s1.onclick = () => save(true);
+			const r1 = document.getElementById('clear-credentials'); if (r1) r1.onclick = clear;
+			const s2 = document.getElementById('save-credentials-2'); if (s2) s2.onclick = () => save(false);
+			const r2 = document.getElementById('clear-credentials-2'); if (r2) r2.onclick = clear;
+		} catch(_){}
 	}
     document.addEventListener('DOMContentLoaded', initializePage);
 } catch(e) {

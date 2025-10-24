@@ -53,6 +53,8 @@
 	var BTTV = false;
 	var SEVENTV = false;
 	var FFZ = false;
+	
+
 
 	function mergeEmotes() { // BTTV takes priority over 7TV in this all.
 		EMOTELIST = {};
@@ -134,8 +136,138 @@
 	var cachedUserProfiles = new Map();
 	var maxCachedProfiles = 10000; // Limit to 10,000 profiles
 	var processedMessages = new Set();
-	var maxTrackedMessages = 40;
+	var maxTrackedMessages = 3;
 	var pastMessages = [];
+	
+	// Persistent cache configuration
+	const CACHE_KEY = 'kick_user_profiles_cache';
+	const CACHE_EXPIRY_DAYS = 7;
+	const CACHE_EXPIRY_MS = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+	
+	// Load cached profiles from localStorage on startup
+	function loadCachedProfiles() {
+		try {
+			const stored = localStorage.getItem(CACHE_KEY);
+			if (stored) {
+				const data = JSON.parse(stored);
+				const now = Date.now();
+				
+				// Filter out expired entries and convert back to Map
+				Object.entries(data).forEach(([username, entry]) => {
+					if (entry.timestamp && (now - entry.timestamp) < CACHE_EXPIRY_MS) {
+						cachedUserProfiles.set(username, entry.profilePic);
+					}
+				});
+				
+				console.log(`[Social Stream] Loaded ${cachedUserProfiles.size} cached user profiles from localStorage`);
+			}
+		} catch (e) {
+			console.error('[Social Stream] Error loading cached profiles:', e);
+		}
+	}
+	
+	// Save cached profiles to localStorage
+	function saveCachedProfiles() {
+		try {
+			const data = {};
+			const now = Date.now();
+			
+			// Convert Map to object with timestamps
+			cachedUserProfiles.forEach((profilePic, username) => {
+				data[username] = {
+					profilePic: profilePic,
+					timestamp: now
+				};
+			});
+			
+			localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+		} catch (e) {
+			console.error('[Social Stream] Error saving cached profiles:', e);
+			// If storage is full, clear old cache and try again
+			if (e.name === 'QuotaExceededError') {
+				localStorage.removeItem(CACHE_KEY);
+				try {
+					localStorage.setItem(CACHE_KEY, JSON.stringify({}));
+				} catch (e2) {
+					console.error('[Social Stream] Failed to clear cache:', e2);
+				}
+			}
+		}
+	}
+	
+	// Debounce saving to localStorage to avoid excessive writes
+	let saveTimeout = null;
+	let lastSaveTime = Date.now();
+	const DEBOUNCE_DELAY = 5000; // 5 seconds of inactivity
+	const MAX_SAVE_INTERVAL = 5 * 60 * 1000; // 5 minutes max between saves
+	
+	function debouncedSaveCachedProfiles() {
+		const now = Date.now();
+		const timeSinceLastSave = now - lastSaveTime;
+		
+		// Clear existing timeout
+		if (saveTimeout) {
+			clearTimeout(saveTimeout);
+		}
+		
+		// If it's been more than 5 minutes, save immediately
+		if (timeSinceLastSave >= MAX_SAVE_INTERVAL) {
+			saveCachedProfiles();
+			lastSaveTime = now;
+		} else {
+			// Otherwise, save after 5 seconds of inactivity
+			saveTimeout = setTimeout(() => {
+				saveCachedProfiles();
+				lastSaveTime = Date.now();
+			}, DEBOUNCE_DELAY);
+		}
+	}
+	
+	// Load cached profiles on startup
+	loadCachedProfiles();
+	
+	// Periodic cleanup of expired cache entries
+	function cleanupExpiredCache() {
+		try {
+			const stored = localStorage.getItem(CACHE_KEY);
+			if (stored) {
+				const data = JSON.parse(stored);
+				const now = Date.now();
+				let hasExpired = false;
+				
+				// Remove expired entries
+				Object.entries(data).forEach(([username, entry]) => {
+					if (!entry.timestamp || (now - entry.timestamp) >= CACHE_EXPIRY_MS) {
+						delete data[username];
+						hasExpired = true;
+						// Also remove from memory cache if present
+						cachedUserProfiles.delete(username);
+					}
+				});
+				
+				// Save cleaned data if any entries were removed
+				if (hasExpired) {
+					localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+					console.log('[Social Stream] Cleaned up expired cache entries');
+				}
+			}
+		} catch (e) {
+			console.error('[Social Stream] Error cleaning up cache:', e);
+		}
+	}
+	
+	// Run cleanup on startup and periodically (every hour)
+	cleanupExpiredCache();
+	setInterval(cleanupExpiredCache, 60 * 60 * 1000);
+	
+	// Also ensure periodic saves every 5 minutes in case of continuous activity
+	setInterval(() => {
+		const now = Date.now();
+		if (now - lastSaveTime >= MAX_SAVE_INTERVAL) {
+			saveCachedProfiles();
+			lastSaveTime = now;
+		}
+	}, 60 * 1000); // Check every minute
 	
 	function escapeHtml(unsafe){
 		try {
@@ -175,6 +307,14 @@
 	} catch(e){}
 
 	var isExtensionOn = true;
+	
+	var channelImg = "";
+	  
+	if (kickUsername){
+		channelImg = await getKickAvatarImage(kickUsername, kickUsername) || "https://kick.com/img/default-profile-pictures/default2.jpeg";
+	}
+	
+	//console.log(channelImg, kickUsername);
 	
 	async function getKickViewerCount(username) {
 		try {
@@ -261,19 +401,6 @@
 			return resp;
 		}
 		
-		// Handle emotes if they exist
-		if (EMOTELIST) {
-			let textContent = "";
-			element.childNodes.forEach(node => {
-				if (node.nodeType === 3 && node.textContent && node.textContent.trim().length > 0) {
-					textContent += escapeHtml(node.textContent);
-				}
-			});
-			
-			if (textContent) {
-				return replaceEmotesWithImages(textContent);
-			}
-		}
 		
 		element.childNodes.forEach(node=>{
 			if (node.childNodes.length){
@@ -285,7 +412,11 @@
 					resp += getAllContentNodes(node);
 				}
 			} else if ((node.nodeType === 3) && node.textContent && (node.textContent.trim().length > 0)){
-				resp += escapeHtml(node.textContent);
+				if (EMOTELIST) {
+					resp += replaceEmotesWithImages(escapeHtml(node.textContent));
+				} else {
+					resp += escapeHtml(node.textContent);
+				}
 			} else if (node.nodeType === 1){
 				if (node && node.classList && node.classList.contains("zero-width-emote")){
 					resp += "<span class='zero-width-parent'>"+node.outerHTML+"</span>";
@@ -328,6 +459,7 @@
 		if (cachedUserProfiles.size >= maxCachedProfiles) {
 			const firstKey = cachedUserProfiles.keys().next().value;
 			cachedUserProfiles.delete(firstKey);
+			debouncedSaveCachedProfiles(); // Save after eviction
 		}
 		
 		// Add placeholder immediately to prevent duplicate requests
@@ -338,6 +470,7 @@
 				if (data && data.profilepic){
 					// Update cache with actual profile pic
 					cachedUserProfiles.set(username, data.profilepic);
+					debouncedSaveCachedProfiles(); // Save after adding new profile
 					return data.profilepic;
 				}
 			});
@@ -372,6 +505,7 @@
 					}
 				}
 				data.type = "kick";
+				
 				chrome.runtime.sendMessage(
 					chrome.runtime.id,
 					{
@@ -466,17 +600,25 @@
 		  }
 	  }
 	  
+	  var member = false;
+	  var mod = false;
 	  ele.querySelector(".chat-message-identity").querySelectorAll(".badge-tooltip img[src], .badge-tooltip svg, .base-badge img[src], .base-badge svg, .badge img[src], .badge svg").forEach(badge=>{
 		try {
 			if (badge && badge.nodeName == "IMG"){
 				var tmp = {};
 				tmp.src = badge.src;
 				tmp.type = "img";
+				if (badge.src.includes("subscriber")){
+					member = badge.getAttribute("alt") || "Subscriber";
+				}
 				chatbadges.push(tmp);
 			} else if (badge && badge.nodeName.toLowerCase() == "svg"){
 				var tmp = {};
 				tmp.html = badge.outerHTML;
 				tmp.type = "svg";
+				if (badge.querySelector('[d="M23.5 2.5v3h-3v3h-3v3h-3v3h-3v-3h-6v6h3v3h-3v3h-3v6h6v-3h3v-3h3v3h6v-6h-3v-3h3v-3h3v-3h3v-3h3v-6h-6Z"]')){
+					mod = true;
+				}
 				chatbadges.push(tmp);
 			}
 		} catch(e){  }
@@ -491,10 +633,9 @@
 	  chatname = chatname.trim();
 	  
 	  var chatimg = "";
-	  var channelName = window.location.pathname.split("/")[1];
 	  
-	  if (channelName && chatname){
-		  chatimg = await getKickAvatarImage(chatname, channelName) || "";
+	  if (kickUsername && chatname){
+		  chatimg = await getKickAvatarImage(chatname, kickUsername) || "";
 	  }
 	  
 	  var data = {};
@@ -520,13 +661,27 @@
 		return;
 	  }
 	  
+	  if (member){
+		data.membership = membership;
+	  }
+	  if (mod){
+		  data.mod = true;
+	  }
+	  
+	  if (kickUsername){
+		  data.sourceName = kickUsername;
+	  }
+	  if (channelImg){
+		  data.sourceImg = channelImg;
+	  }
+	//	console.log(data);
+	  
 	  //if (brandedImageURL){
 	  //  data.sourceImg = brandedImageURL;
 	  //}
 	  
 	  try {
 		chrome.runtime.sendMessage(chrome.runtime.id, { "message": data }, (e)=>{
-			console.warn(e);
 			if (ele && e && e.id){
 				ele.dataset.mid = e.id;
 			}
@@ -536,11 +691,46 @@
 	  }
 	}
 	
+	var signedInUser = false;
+	
+	
+	function getAuthenticatedUsername() {
+		try {
+			const scripts = document.querySelectorAll('script');
+			
+			for (const script of scripts) {
+				const content = script.textContent || '';
+				
+				// Check if this script contains Next.js push data
+				if (content.includes('self.__next_f.push') && content.includes('authenticated')) {
+					
+					let splitit = content.split("channelId").pop();
+					// Look for username pattern - simpler regex that handles escaped content
+					const usernameMatch = splitit.match(/username\\":\\"([^"\\]+)\\"/);
+					
+					if (usernameMatch && usernameMatch[1]) {
+						return usernameMatch[1];
+					}
+					
+					// Fallback: try without escaping
+					const fallbackMatch = splitit.match(/username":"([^"]+)"/);
+					if (fallbackMatch && fallbackMatch[1]) {
+						return fallbackMatch[1];
+					}
+				}
+			}
+		} catch (e) {
+			console.error('[Social Stream] Error extracting authenticated username:', e);
+		}
+		
+		return null;
+	}
+	
 	async function processMessageNew(ele){	// new popout format
 	
 	  if (!ele || !ele.isConnected) return;
 	  
-	  if (ele.querySelector(".line-through")){
+	  if (ele.querySelector(".line-through, .text-neutral>.font-semibold")){
 		 // console.log("DELETEED");
 		  try {
 				var data = {};
@@ -550,6 +740,7 @@
 				data.chatname = data.chatname.trim();
 				ele.dataset.mid ? (data.id = parseInt(ele.dataset.mid)) || null : "";
 				data.type = "kick";
+				
 				chrome.runtime.sendMessage(
 					chrome.runtime.id,
 					{
@@ -573,24 +764,36 @@
 		sibling = sibling.nextElementSibling;
 	  }
 	  
+	  var chatname = "";
 	  let messageId = "";
+	  
 	  try {
-		const content = ele.textContent || "";
-		const imgSrcs = Array.from(ele.querySelectorAll('img')).map(img => img.src).join(' ');
-		messageId = `${content.slice(0, 100)}${imgSrcs ? ' ' + imgSrcs : ''}`;
+		chatname = escapeHtml(ele.querySelector("button[title]").innerText);
 		
-		if (processedMessages.has(messageId)) return;
-		
-		processedMessages.add(messageId);
-		
-		if (processedMessages.size > maxTrackedMessages) {
-		  const entriesToRemove = processedMessages.size - maxTrackedMessages;
-		  const entries = Array.from(processedMessages);
-		  for (let i = 0; i < entriesToRemove; i++) {
-			processedMessages.delete(entries[i]);
-		  }
+	  } catch(e){
+		  return;
+	  }
+	  
+	  
+	  try {
+		 console.log(signedInUser);
+		if (signedInUser && signedInUser==chatname){
+			const content = ele.textContent || "";
+			const imgSrcs = Array.from(ele.querySelectorAll('img')).map(img => img.src).join(' ');
+			messageId = `${content.slice(0, 100)}${imgSrcs ? ' ' + imgSrcs : ''}`;
+			
+			if (processedMessages.has(messageId)) return;
+			
+			processedMessages.add(messageId);
+			
+			if (processedMessages.size > maxTrackedMessages) {
+			  const entriesToRemove = processedMessages.size - maxTrackedMessages;
+			  const entries = Array.from(processedMessages);
+			  for (let i = 0; i < entriesToRemove; i++) {
+				processedMessages.delete(entries[i]);
+			  }
+			}
 		}
-		
 	  } catch(e) {
 		  console.error(e);
 		return;
@@ -607,17 +810,10 @@
 	  var chatsticker = false;
 	  var chatmessage = "";
 	  var nameColor = "";
-	  var chatname = "";
 	  var name ="";
 	  var chatbadges = [];
 	  
 	  
-	  try {
-		chatname = escapeHtml(ele.querySelector("button[title]").innerText);
-		
-	  } catch(e){
-		  return;
-	  }
 	  try {
 		nameColor = ele.querySelector("button[title]").style.color;
 	  } catch(e){}
@@ -666,31 +862,38 @@
 	  if (settings.replyingto){
 		  let reply = ele.querySelector(".text-xs button");
 		  if (reply){
-				reply = getAllContentNodes(reply).trim();
+				reply = getAllContentNodes(reply.parentNode).trim();
 				if (reply){
 					replyMessage = reply;
 					originalMessage = chatmessage;
 					if (settings.textonlymode) {
-						chatmessage = "@"+reply + ": " + chatmessage;
+						chatmessage = reply + ": " + chatmessage;
 					} else {
-						chatmessage = "<i><small>@"+reply + ":&nbsp;</small></i> " + chatmessage;
+						chatmessage = "<i><small>"+reply + ":&nbsp;</small></i> " + chatmessage;
 					}
 				}
 		  }
 	  }
 	  
-	  
+	  var member = false;
+	  var mod = false;
 	  ele.querySelectorAll("div > div > div > div > div > div[data-state] img[src], div > div > div > div > div > div[data-state] svg").forEach(badge=>{
 		try {
 			if (badge && badge.nodeName == "IMG"){
 				var tmp = {};
 				tmp.src = badge.src;
 				tmp.type = "img";
+				if (badge.src.includes("subscriber")){
+					member = badge.getAttribute("alt") || "Subscriber";
+				}
 				chatbadges.push(tmp);
 			} else if (badge && badge.nodeName.toLowerCase() == "svg"){
 				var tmp = {};
 				tmp.html = badge.outerHTML;
 				tmp.type = "svg";
+				if (badge.querySelector('[d="M23.5 2.5v3h-3v3h-3v3h-3v3h-3v-3h-6v6h3v3h-3v3h-3v6h6v-3h3v-3h3v3h6v-6h-3v-3h3v-3h3v-3h3v-3h3v-6h-6Z"]')){
+					mod = true;
+				}
 				chatbadges.push(tmp);
 			}
 		} catch(e){  }
@@ -705,10 +908,9 @@
 	  chatname = chatname.trim();
 	  
 	  var chatimg = "";
-	  var channelName = window.location.pathname.split("/")[2];
 	  
-	  if (channelName && chatname){
-		  chatimg = await getKickAvatarImage(chatname, channelName) || "";
+	  if (kickUsername && chatname){
+		  chatimg = await getKickAvatarImage(chatname, kickUsername) || "";
 	  }
 	  
 	  var data = {};
@@ -726,13 +928,28 @@
 	  data.chatmessage = chatmessage;
 	  data.chatimg = chatimg;
 	  data.hasDonation = hasDonation;
-	  data.membership = "";
+	  if (member){
+		data.membership = member;
+	  }
+	  if (mod){
+		  data.mod = true;
+	  }
 	  data.textonly = settings.textonlymode || false;
 	  data.type = "kick";
+	  
+	  
 	  
 	  if (!chatmessage && !hasDonation){
 		return;
 	  }
+	  if (kickUsername){
+		  data.sourceName = kickUsername;
+	  }
+	  if (channelImg){
+		  data.sourceImg = channelImg;
+	  }
+	  
+	  //console.log(data);
 	  
 	  //if (brandedImageURL){
 	  //  data.sourceImg = brandedImageURL;
@@ -914,7 +1131,7 @@
 	
 	console.log("Social stream injected - " + (isPopoutChat ? "new popout" : "old chatroom"));
 	
-	var xxx = setInterval(function(){
+	var xxx = setInterval(async function(){ 
 		if (isPopoutChat) {
 			// New popout chat
 			if (document.querySelectorAll("#chatroom-messages > div").length){
@@ -933,6 +1150,9 @@
 					}
 				},3000);
 			}
+			if (!signedInUser){
+				signedInUser = getAuthenticatedUsername();
+			}
 		} else {
 			// Old chatroom
 			if (document.getElementById("chatroom")){
@@ -949,6 +1169,31 @@
 				},3000);
 			}
 		}
+		
+		try {
+			let kickUsername = extractKickUsername(window.location.href);
+			if (kickUsername && document.querySelector('[data-testid="not-found"]')){
+				if (kickUsername.includes("_")){
+					kickUsername = kickUsername.replaceAll("_","-").toLowerCase();
+					const newUrl = `https://kick.com/popout/${encodeURIComponent(kickUsername)}/chat?popout=`;
+					window.location.replace(newUrl); // Use replace to avoid history issues
+					throw new Error('Redirecting to new Kick URL format');
+				} else if (kickUsername.includes("-")){
+					kickUsername = kickUsername.replaceAll("-","_").toLowerCase();
+					const newUrl = `https://kick.com/popout/${encodeURIComponent(kickUsername)}/chat?popout=`;
+					window.location.replace(newUrl); // Use replace to avoid history issues
+					throw new Error('Redirecting to new Kick URL format');
+				} else if (kickUsername.toLowerCase() !== kickUsername){
+					kickUsername = kickUsername.toLowerCase();
+					const newUrl = `https://kick.com/popout/${encodeURIComponent(kickUsername)}/chat?popout=`;
+					window.location.replace(newUrl); // Use replace to avoid history issues
+					throw new Error('Redirecting to new Kick URL format');
+				}
+			}
+		}catch(e){
+			console.error(e);
+		}
+		
 	},1000);
 	
 	///////// the following is a loopback webrtc trick to get chrome to not throttle this twitch tab when not visible.

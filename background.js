@@ -9,6 +9,9 @@ try {
 
 var isExtensionOn = false;
 var iframe = null;
+// Optional: Use VDONinjaSDK instead of iframe transport to reduce memory
+var ninjaBridge = null;
+var useNinjaSDK = false; // toggled via URL param &sdk, or can be wired to settings in future
 
 var settings = {};
 var messageTimeout = {};
@@ -16,6 +19,10 @@ var lastSentMessage = "";
 var lastSentTimestamp = 0;
 var lastMessageCounter = 0;
 var sentimentAnalysisLoaded = false;
+
+// Spotify integration
+var spotify = null;
+console.log("Background.js: SpotifyIntegration available?", typeof SpotifyIntegration !== 'undefined');
 
 var messageCounterBase = Math.floor(Math.random() * 90000);
 var messageCounter = messageCounterBase;
@@ -26,6 +33,9 @@ var isSSAPP = false;
 
 var urlParams = new URLSearchParams(window.location.search);
 var devmode = urlParams.has("devmode") || false;
+var lastUseNinjaSDK = undefined; // track effective SDK usage across settings loads
+// initial default (may be recalculated when settings load)
+useNinjaSDK = false;
 
 var FacebookDupes = "";
 var FacebookDupesTime = null;
@@ -106,9 +116,19 @@ if (typeof chrome.runtime == "undefined") {
 		ipcRenderer.sendSync("storageSave", data);
 		log("ipcRenderer.sendSync('storageSave',data);");
 	};
-	chrome.storage.sync.get = async function (arg, callback) {
-		var response = await ipcRenderer.sendSync("storageGet", arg);
-		callback(response);
+	chrome.storage.sync.get = function (arg, callback) {
+		// Support both callback and promise-based usage
+		if (typeof callback === 'function') {
+			// Callback mode
+			var response = ipcRenderer.sendSync("storageGet", arg);
+			callback(response);
+		} else {
+			// Promise mode
+			return new Promise((resolve) => {
+				var response = ipcRenderer.sendSync("storageGet", arg);
+				resolve(response);
+			});
+		}
 	};
 	chrome.storage.sync.remove = async function (arg, callback) {
 		// only used for upgrading; not important atm.
@@ -116,15 +136,15 @@ if (typeof chrome.runtime == "undefined") {
 	};
 
 	chrome.storage.local = {};
-	chrome.storage.local.get = async function (arg, callback) {
-		log("LOCAL SYNC GET");
-		var response = await ipcRenderer.sendSync("storageGet", arg);
-		callback(response);
+	chrome.storage.local.get = function (keys, callback) {
+		log("LOCAL STORAGE GET - using sync storage in Electron");
+		// In Electron, just use sync storage
+		return chrome.storage.sync.get(keys, callback);
 	};
-	chrome.storage.local.set = function (data) {
-		log("LOCAL SYNC SET", data);
-		ipcRenderer.sendSync("storageSave", data);
-		log("ipcRenderer.sendSync('storageSave',data);");
+	chrome.storage.local.set = function (data, callback) {
+		log("LOCAL STORAGE SET - using sync storage in Electron", data);
+		// In Electron, just use sync storage
+		return chrome.storage.sync.set(data, callback);
 	};
 
 	chrome.tabs = {};
@@ -203,12 +223,26 @@ if (typeof chrome.runtime == "undefined") {
 		sender.tab.id = null;
 
 		if (args[0]) {
-			onMessageCallback(args[0], sender, function (response) {
+			// Handle batch messages
+			if (args[0].messages && Array.isArray(args[0].messages)) {
+				// Process batch messages from TikTok
+				args[0].messages.forEach(message => {
+					onMessageCallback({ message }, sender, function (response) {
+						// Individual responses for batch messages
+					});
+				});
 				if (event.returnValue) {
-					event.returnValue = response;
+					event.returnValue = { success: true, count: args[0].messages.length };
 				}
-				ipcRenderer.send("fromBackgroundResponse", response);
-			});
+			} else {
+				// Handle single message (backward compatibility)
+				onMessageCallback(args[0], sender, function (response) {
+					if (event.returnValue) {
+						event.returnValue = response;
+					}
+					ipcRenderer.send("fromBackgroundResponse", response);
+				});
+			}
 		}
 	});
 	ipcRenderer.on("fromMainSender", (event, args) => {
@@ -236,9 +270,16 @@ if (typeof chrome.runtime == "undefined") {
 		var sender = {};
 		sender.tab = {};
 		sender.tab.id = null;
-		onMessageCallback(args[0], sender, function (response) {
+		const request = args[0];
+		const callbackId = request ? request.callbackId : null;
+		
+		onMessageCallback(request, sender, function (response) {
 			// (request, sender, sendResponse)
 			//log("sending response to pop up:",response);
+			// Preserve callbackId in response if it exists
+			if (callbackId && response) {
+				response.callbackId = callbackId;
+			}
 			ipcRenderer.send("fromBackgroundPopupResponse", response);
 		});
 	});
@@ -922,16 +963,31 @@ function loadSettings(item, resave = false) {
 			// we're saving below instead
 		}
 	}
-	if (reloadNeeded) {
-		updateExtensionState(false);
-	}
+    // Recompute effective SDK usage on settings load
+    try {
+        const settingsSDK = (settings?.sdk?.setting === true) || (settings?.sdk === true) || (settings?.usesdk?.setting === true);
+        const effective = !!settingsSDK;
+        if (lastUseNinjaSDK === undefined) {
+            lastUseNinjaSDK = effective;
+        } else if (effective !== lastUseNinjaSDK) {
+            lastUseNinjaSDK = effective;
+            useNinjaSDK = effective;
+            reloadNeeded = true; // transport mode changed → reinit
+        } else {
+            useNinjaSDK = effective;
+        }
+    } catch(e) {}
+
+    if (reloadNeeded) {
+        updateExtensionState(false);
+    }
 	
 	try {
 		if (isSSAPP && ipcRenderer) {
 			ipcRenderer.sendSync("fromBackground", { streamID, password, settings, state: isExtensionOn }); 
 			//ipcRenderer.send('backgroundLoaded');
 			if (resave && settings){
-				chrome.storage.sync.set({ settings});
+				chrome.storage.local.set({ settings});
 				chrome.runtime.lastError;
 			}
 		}
@@ -943,8 +999,17 @@ function loadSettings(item, resave = false) {
 
 	if (settings.addkarma) {
 		if (!sentimentAnalysisLoaded) {
-			loadSentimentAnalysis();
+			try {
+				loadSentimentAnalysis();
+			} catch(e){
+				console.error(e);
+			}
 		}
+	}
+	
+	// Initialize Spotify if enabled
+	if (settings.spotifyEnabled) {
+		initializeSpotify();
 	}
 
 	const timedMessage = settings['timedMessage'] || [];
@@ -1408,18 +1473,38 @@ async function overwriteFileExcel(data = false) {
 async function resetSettings(item = false) {
 	log("reset settings");
 	//alert("Settings reset");
-	chrome.storage.sync.get(properties, async function (item) {
+	chrome.storage.local.get(properties, async function (item) {
 		if (!item) {
 			item = {};
 		}
 		item.settings = {};
-		loadSettings(item, true);
+		
+		// Clear the global settings object
+		settings = {};
+		
+		// Reset Spotify instance if it exists
+		if (spotify) {
+			spotify.accessToken = null;
+			spotify.refreshToken = null;
+			spotify.tokenExpiry = null;
+			spotify.isPolling = false;
+			if (spotify.pollInterval) {
+				clearInterval(spotify.pollInterval);
+				spotify.pollInterval = null;
+			}
+		}
+		
+		// Save the empty settings to storage first
+		chrome.storage.local.set({ settings: {} }, function() {
+			// Then load default settings
+			loadSettings(item, true);
+		});
 		// window.location.reload()
 	});
 }
 
 async function exportSettings() {
-	chrome.storage.sync.get(properties, async function (item) {
+	chrome.storage.local.get(properties, async function (item) {
 		item.settings = settings;
 		const opts = {
 			types: [
@@ -1605,15 +1690,20 @@ function updateExtensionState(sync = true) {
 		if (chrome.action && chrome.action.setIcon){
 			chrome.action.setIcon({ path: "/icons/on.png" });
 		}
-		if (streamID) {
-			loadIframe(streamID, password);
-		}
+        if (streamID) {
+            initTransport(streamID, password);
+        }
 		setupSocket();
 		setupSocketDock();
 	} else {
 		
 		// document.title = "Idle - Social Stream Ninja";
 		
+		if (ninjaBridge) {
+			try { ninjaBridge.destroy(); } catch(e){}
+			ninjaBridge = null;
+		}
+
 		if (iframe) {
 			iframe.src = null;
 			iframe.remove();
@@ -2546,8 +2636,7 @@ try {
         if (videoId && (
           tab.url.includes('https://studio.youtube.com/live_chat?') ||
           tab.url.includes('https://www.youtube.com/live_chat?') ||
-          tab.url.includes('https://www.youtube.com/live/') ||
-          (tab.url.includes('https://studio.youtube.com/video/') && tab.url.includes('/livestreaming'))
+          tab.url.includes('https://www.youtube.com/live/')
         )) {
           const isPopout = tab.url.includes('live_chat?is_popout=1');
           activeChatSources.set(`${tabId}-0`, { url: tab.url, videoId: videoId, isPopout: isPopout });
@@ -2634,6 +2723,25 @@ async function processIncomingMessage(message, sender=null){
 		
 		if (reflection){
 			message.reflection = true;
+			try {
+				if (message.tid && message.chatmessage) {
+					const normalized = sanitizeMessageForTracking(message.chatmessage, false);
+					const origin = getStoredMessageOrigin(message.tid, normalized);
+					if (origin) {
+						message.reflectionOrigin = origin;
+						if (origin === 'host') {
+							message.hostReflection = true;
+						} else if (origin === 'chatbot') {
+							message.chatbotReflection = true;
+						}
+						if (settings.allowChatBot) {
+							console.log(`[ChatBot] Reflection marked as ${origin} for ${message.chatname || 'unknown'} on ${message.type || 'unknown'}.`);
+						}
+					}
+				}
+			} catch (e) {
+				errorlog(e);
+			}
 		}
 		
 		if (settings.noduplicates && // filters echos if same TYPE, USERID, and MESSAGE 
@@ -2649,7 +2757,7 @@ async function processIncomingMessage(message, sender=null){
 				}
 			}
 			try {
-				if (sender?.tab){
+				if (sender?.tab && ("iframeId" in sender)){
 					const shouldAllowMessage = shouldAllowYouTubeMessage(sender.tab.id, sender.tab.url, message, sender.frameId);
 					if (!shouldAllowMessage) {
 					  return;
@@ -2749,6 +2857,12 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			sendResponse({"state": isExtensionOn});
 			return response;
 		}
+		
+		// Unwrap messages that come from the service worker for non-Spotify commands
+		// Service worker wraps messages as {type: 'toBackground', data: originalMessage}
+		if (request.type === 'toBackground' && request.data) {
+			request = request.data;
+		}
 
 		if (request.cmd && request.cmd === "setOnOffState") {
 			// toggle the IFRAME (stream to the remote dock) on or off
@@ -2759,11 +2873,14 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 		} else if (request.cmd && request.cmd === "getOnOffState") {
 			sendResponse({ state: isExtensionOn, streamID: streamID, password: password, settings: settings });
 		} else if (request.cmd && request.cmd === "getSettings") {
+			let responseData;
 			try { 
-				sendResponse({ state: isExtensionOn, streamID: streamID, password: password, settings: settings, documents: documentsRAG});
+				responseData = { state: isExtensionOn, streamID: streamID, password: password, settings: settings, documents: documentsRAG};
 			} catch(e){
-				sendResponse({ state: isExtensionOn, streamID: streamID, password: password, settings: settings});
+				console.warn("Error including documentsRAG:", e);
+				responseData = { state: isExtensionOn, streamID: streamID, password: password, settings: settings};
 			}
+			sendResponse(responseData);
 		} else if (request.cmd && request.cmd === "saveSetting") {
 			if (typeof settings[request.setting] == "object") {
 				if (!request.value) {
@@ -2798,6 +2915,13 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 				settings: settings
 			});
 			chrome.runtime.lastError;
+
+			// If SDK setting changed, reinitialize transport if extension is ON
+			try {
+				if (request.setting === 'sdk' && isExtensionOn && streamID) {
+					initTransport(streamID, password);
+				}
+			} catch(e) { console.warn(e); }
 
 			sendResponse({ state: isExtensionOn });
 			
@@ -2838,7 +2962,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 						iframe = null;
 					}
 					if (isExtensionOn) {
-						loadIframe(streamID, password);
+                        initTransport(streamID, password);
 					}
 				} else {
 					if (iframe) {
@@ -2850,7 +2974,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 						iframe = null;
 					}
 					if (isExtensionOn) {
-						loadIframe(streamID, password);
+                        initTransport(streamID, password);
 					}
 				}
 			}
@@ -2879,6 +3003,12 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 				}
 			}
 			if (request.setting == "textonlymode") { 
+				pushSettingChange();
+			}
+			if (request.setting == "youtubeLargerFont") { 
+				pushSettingChange();
+			}
+			if (request.setting == "vdoninjadiscord") { 
 				pushSettingChange();
 			}
 			if (request.setting == "ignorealternatives") {
@@ -2916,7 +3046,9 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			if (request.setting == "ticker") {
 				try {
 					await loadFileTicker();
-				} catch(e){}
+				} catch(e) {
+					console.error("Error loading ticker:", e);
+				}
 			}
 			if (request.setting == "discord") {
 				pushSettingChange();
@@ -3055,7 +3187,11 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			if (request.setting == "addkarma") {
 				if (request.value) {
 					if (!sentimentAnalysisLoaded) {
-						loadSentimentAnalysis();
+						try {
+							loadSentimentAnalysis();
+						} catch(e){
+							console.error(e);
+						}
 					}
 				}
 			}
@@ -3178,12 +3314,16 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			var letsGo = await processIncomingMessage(request.message, sender);
 			
 		} else if ("messages" in request) {
-			// Handle batch messages from YouTube
+			// Handle batch messages from YouTube and TikTok
 			sendResponse({ state: isExtensionOn });
 			if (Array.isArray(request.messages)) {
-				for (const message of request.messages) {
-					await processIncomingMessage(message, sender);
-				}
+				// Process messages in parallel for better performance
+				await Promise.all(request.messages.map(message => 
+					processIncomingMessage(message, sender).catch(error => {
+						console.error('Error processing message:', error);
+						// Continue processing other messages even if one fails
+					})
+				));
 			}
 		} else if ("getBTTV" in request) {
 			// forwards messages from Youtube/Twitch/Facebook to the remote dock via the VDO.Ninja API
@@ -3363,6 +3503,30 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			
 			triggerFakeRandomMessage();
 			
+		} else if (request.action === "startReplay") {
+			// Handle replay messages from timestamp
+			console.log('Received startReplay request:', request);
+			
+			// Check if extension is on
+			if (!isExtensionOn) {
+				sendResponse({ error: 'Social Stream is not enabled. Please turn it on first.' });
+				return;
+			}
+			
+			handleReplayMessages(request, sendResponse);
+			return true; // async response
+		} else if (request.action === "pauseReplay") {
+			pauseReplay(request.sessionId);
+			sendResponse({success: true, state: isExtensionOn});
+		} else if (request.action === "resumeReplay") {
+			resumeReplay(request.sessionId);
+			sendResponse({success: true, state: isExtensionOn});
+		} else if (request.action === "stopReplay") {
+			stopReplay(request.sessionId);
+			sendResponse({success: true, state: isExtensionOn});
+		} else if (request.action === "updateReplaySpeed") {
+			updateReplaySpeed(request.sessionId, request.speed);
+			sendResponse({success: true, state: isExtensionOn});
 		} else if (request.cmd && request.cmd === "sidUpdated") {
 			if (request.streamID) {
 				streamID = request.streamID;
@@ -3414,7 +3578,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 				iframe = null;
 			}
 			if (isExtensionOn) {
-				loadIframe(streamID, password);
+                initTransport(streamID, password);
 			}
 			
 			if (isSSAPP){
@@ -3455,6 +3619,174 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 			localStorage.removeItem('customBadwords');
 			initialLoadBadWords();
 			sendResponse({success: true, state: isExtensionOn });
+		} else if (request.cmd && request.cmd === "spotifyAuthCallback") {
+			// Handle Spotify OAuth callback
+			if (!spotify) {
+				initializeSpotify();
+			}
+			
+			if (spotify && request.code) {
+				(async () => {
+					try {
+						const success = await spotify.handleAuthCallback(request.code, request.state);
+						sendResponse({success: success});
+					} catch (error) {
+						console.error("Spotify callback error:", error);
+						sendResponse({success: false, error: error.message});
+					}
+				})();
+				return true; // Keep the message channel open for async response
+			} else {
+				sendResponse({success: false, error: "Spotify not initialized or no code provided"});
+			}
+		} else if (request.cmd && request.cmd === "spotifyAuth") {
+			// Start Spotify OAuth flow
+			console.log("Spotify auth request received");
+			
+			// Check if SpotifyIntegration class is available synchronously
+			if (typeof SpotifyIntegration === 'undefined' && typeof window.SpotifyIntegration === 'undefined') {
+				console.error("SpotifyIntegration class not loaded yet");
+				sendResponse({success: false, error: "Spotify integration is still loading. Please try again in a moment."});
+				return true;
+			}
+			
+			if (!spotify) {
+				console.log("Initializing Spotify...");
+				initializeSpotify();
+			}
+			
+			if (!spotify) {
+				console.error("Failed to initialize Spotify instance");
+				sendResponse({success: false, error: "Failed to initialize Spotify. Please check the console for errors."});
+				return true;
+			}
+			
+			// Process the OAuth flow asynchronously
+			console.log("Starting OAuth flow...");
+			spotify.startOAuthFlow().then(result => {
+				console.log("OAuth flow result:", result);
+				
+				// Handle the response
+				if (typeof result === 'object' && result.alreadyConnected) {
+					sendResponse({success: true, alreadyConnected: true});
+				} else if (isSSAPP && result) {
+					sendResponse({
+						success: true,
+						message: "Please complete authorization in your browser. After authorizing, copy the full URL from the callback page and use the 'Paste Callback URL' option in the settings."
+					});
+				} else {
+					sendResponse({success: !!result});
+				}
+			}).catch(error => {
+				console.error("Spotify auth error:", error);
+				sendResponse({success: false, error: error.message || error.toString()});
+			});
+			
+			return true; // Keep the message channel open for async response
+		} else if (request.cmd && request.cmd === "spotifyManualCallback") {
+			// Handle manual callback URL paste (for Electron app)
+			console.log("Manual Spotify callback received with URL:", request.url);
+			
+			if (!request.url) {
+				sendResponse({success: false, error: "No URL provided"});
+				return;
+			}
+			
+			// Process asynchronously
+			(async () => {
+				try {
+					// Initialize Spotify if needed
+					if (!spotify) {
+						console.log("Spotify not initialized, initializing now...");
+						initializeSpotify();
+						// Wait a bit for initialization
+						await new Promise(resolve => setTimeout(resolve, 500));
+					}
+					
+					if (!spotify) {
+						throw new Error("Failed to initialize Spotify integration");
+					}
+					
+					// Parse the callback URL
+					const url = new URL(request.url);
+					const code = url.searchParams.get('code');
+					const state = url.searchParams.get('state');
+					const error = url.searchParams.get('error');
+					
+					console.log("Parsed OAuth callback - code:", code ? "present" : "missing", "state:", state, "error:", error);
+					
+					if (error) {
+						sendResponse({success: false, error: error});
+					} else if (code) {
+						console.log("Processing Spotify callback with code...");
+						// Process the callback
+						const success = await spotify.handleAuthCallback(code, state);
+						console.log("Spotify callback completed, success:", success);
+						
+						if (success) {
+							// Verify tokens were saved
+							chrome.storage.local.get(['settings'], function(data) {
+								if (data.settings && data.settings.spotifyAccessToken) {
+									console.log("✅ Spotify tokens successfully saved to settings!");
+								} else {
+									console.warn("⚠️ Spotify tokens may not have been saved properly");
+								}
+							});
+						}
+						
+						sendResponse({success: success});
+					} else {
+						sendResponse({success: false, error: "No authorization code found in URL"});
+					}
+				} catch (error) {
+					console.error("Manual callback error:", error);
+					sendResponse({success: false, error: error.message || error.toString()});
+				}
+			})();
+			
+			return true; // Keep message channel open for async response
+		} else if (request.cmd && request.cmd === "spotifySignOut") {
+			// Handle Spotify sign out
+			console.log("Spotify sign out request received");
+			
+			// Clear Spotify tokens from settings synchronously first
+			delete settings.spotifyAccessToken;
+			delete settings.spotifyRefreshToken;
+			delete settings.spotifyTokenExpiry;
+			
+			// Reset Spotify instance if it exists
+			if (spotify) {
+				spotify.accessToken = null;
+				spotify.refreshToken = null;
+				spotify.tokenExpiry = null;
+				spotify.isPolling = false;
+				if (spotify.pollInterval) {
+					clearInterval(spotify.pollInterval);
+					spotify.pollInterval = null;
+				}
+				// Update the Spotify instance's settings reference
+				// This ensures it sees the cleared tokens
+				if (spotify.settings) {
+					delete spotify.settings.spotifyAccessToken;
+					delete spotify.settings.spotifyRefreshToken;
+					delete spotify.settings.spotifyTokenExpiry;
+				}
+			}
+			
+			// Save updated settings asynchronously
+			chrome.storage.local.set({
+				settings: settings
+			}, function() {
+				if (chrome.runtime.lastError) {
+					console.error("Error saving cleared settings:", chrome.runtime.lastError);
+					// Don't send error response since tokens are already cleared
+				} else {
+					console.log("Spotify tokens cleared successfully");
+				}
+			});
+			
+			// Respond immediately - tokens are already cleared in memory
+			sendResponse({success: true});
 		} else if (request.cmd && request.target){
 			sendResponse({ state: isExtensionOn });
 			sendTargetP2P(request, request.target);
@@ -3464,7 +3796,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 	} catch (e) {
 		console.warn(e);
 	}
-	return true;
+	return true; // Keep message channel open for async responses
 });
 
 const randomDigits = () => {
@@ -3582,6 +3914,9 @@ let cleanUpLastTabs;
 
 async function sendToDestinations(message) {
 	if (typeof message == "object") {
+		if (message.suppressRelay) {
+			return true;
+		}
 		
 		if (message.chatname) {
 			message.chatname = filterXSS(message.chatname); // I do escapeHtml at the point of capture instead
@@ -3656,7 +3991,8 @@ async function sendToDestinations(message) {
 		}
 
 		if (settings.filtereventstoggle && settings.filterevents && settings.filterevents.textsetting && message.chatmessage && message.event) {
-			if (settings.filterevents.textsetting.split(",").some(v => (v.trim() && message.chatmessage.includes(v)))) {
+			const messageText = message.textContent || message.chatmessage;
+			if (settings.filterevents.textsetting.split(",").some(v => (v.trim() && messageText.includes(v)))) {
 				return false;
 			}
 		}
@@ -3695,7 +4031,13 @@ async function sendToDestinations(message) {
 					var viewerCounts = {};
 					for (const [tid, tabData] of metaDataStore) {
 						if (tabData.viewer_update && tabData.viewer_update.type){
-							const count = parseInt(tabData.viewer_update.meta) || 0;
+							let count = parseInt(tabData.viewer_update.meta) || 0;
+							
+							// Pump the numbers if enabled
+							if (settings.pumpTheNumbers) {
+								count = Math.round(count * 1.75);
+							}
+							
 							viewerCounts[tabData.viewer_update.type] = (viewerCounts[tabData.viewer_update.type] || 0) + count;
 						}
 					}
@@ -3757,7 +4099,7 @@ async function sendToDestinations(message) {
 	return true;
 }
 
-async function replayMessagesFromTimestamp(startTimestamp) {
+async function replayMessagesFromTimestamp(startTimestamp, endTimestamp = null, speed = 1, sessionId = null) {
     const db = await messageStoreDB.ensureDB();
     
     return new Promise((resolve, reject) => {
@@ -3766,7 +4108,13 @@ async function replayMessagesFromTimestamp(startTimestamp) {
         const index = store.index("timestamp");
         const messages = [];
         
-        const range = IDBKeyRange.lowerBound(startTimestamp);
+        let range;
+        if (endTimestamp) {
+            range = IDBKeyRange.bound(startTimestamp, endTimestamp);
+        } else {
+            range = IDBKeyRange.lowerBound(startTimestamp);
+        }
+        
         const cursorRequest = index.openCursor(range);
         
         cursorRequest.onsuccess = (event) => {
@@ -3776,29 +4124,163 @@ async function replayMessagesFromTimestamp(startTimestamp) {
                 cursor.continue();
             } else {
                 if (messages.length === 0) {
-                    resolve(0);
+                    resolve({ messageCount: 0, messages: [] });
                     return;
                 }
 
                 messages.sort((a, b) => a.timestamp - b.timestamp);
-                const baseTime = messages[0].timestamp;
+                
+                // Calculate when replay should start relative to now
+                const replayStartTime = Date.now();
+                const originalStartTime = startTimestamp;
+                
+                // Store session info for control
+                if (sessionId) {
+                    replaySessions[sessionId] = {
+                        messages: messages,
+                        currentIndex: 0,
+                        isPaused: false,
+                        speed: speed,
+                        timeouts: [],
+                        startTime: replayStartTime,
+                        originalStartTime: originalStartTime
+                    };
+                }
 
-                messages.forEach(message => {
-					
-                    const relativeDelay = message.timestamp - baseTime;
-					delete message.mid; // only found in messages restored from db.
-					
-                    setTimeout(() => {
-                        sendDataP2P(message);
-                    }, relativeDelay);
+                // Log first and last message times for debugging
+                if (messages.length > 0) {
+                    console.log('Replay timeline:', {
+                        requestedStart: new Date(originalStartTime).toLocaleString(),
+                        firstMessage: new Date(messages[0].timestamp).toLocaleString(),
+                        lastMessage: new Date(messages[messages.length - 1].timestamp).toLocaleString(),
+                        totalDuration: ((messages[messages.length - 1].timestamp - originalStartTime) / 1000 / 60).toFixed(1) + ' minutes',
+                        messageCount: messages.length
+                    });
+                }
+
+                messages.forEach((message, index) => {
+                    // Calculate delay from the requested start time, not from first message
+                    const messageOffsetFromStart = message.timestamp - originalStartTime;
+                    const scaledDelay = messageOffsetFromStart / speed;
+                    
+                    // Skip messages that would have negative delay (shouldn't happen with proper range query)
+                    if (scaledDelay < 0) {
+                        console.warn('Skipping message with negative delay:', message);
+                        return;
+                    }
+                    
+                    // Log timing for first few messages
+                    if (index < 3) {
+                        console.log(`Message ${index + 1} will play after ${(scaledDelay / 1000).toFixed(1)}s - "${message.chatmessage?.substring(0, 50)}..."`);
+                    }
+                    
+                    delete message.mid; // only found in messages restored from db.
+                    
+                    const timeoutId = setTimeout(() => {
+                        if (sessionId && replaySessions[sessionId]) {
+                            if (!replaySessions[sessionId].isPaused) {
+                                sendDataP2P(message);
+                                replaySessions[sessionId].currentIndex = index + 1;
+                                
+                                // Send progress update
+                                const progress = ((index + 1) / messages.length) * 100;
+                                // Send to all extension pages
+                                chrome.runtime.sendMessage({
+                                    action: 'replayProgress',
+                                    sessionId: sessionId,
+                                    progress: progress,
+                                    currentMessage: index + 1,
+                                    totalMessages: messages.length,
+                                    currentTimestamp: message.timestamp,
+                                    messageDetails: {
+                                        chatname: message.chatname,
+                                        chatmessage: message.chatmessage
+                                    }
+                                }).catch(() => {
+                                    // Ignore errors if no listeners
+                                });
+                                
+                                // Clean up if this was the last message
+                                if (index === messages.length - 1) {
+                                    delete replaySessions[sessionId];
+                                }
+                            }
+                        } else {
+                            sendDataP2P(message);
+                        }
+                    }, scaledDelay);
+                    
+                    if (sessionId && replaySessions[sessionId]) {
+                        replaySessions[sessionId].timeouts.push(timeoutId);
+                    }
                 });
 
-                resolve(messages.length);
+                resolve({ messageCount: messages.length, messages: messages });
             }
         };
         
         cursorRequest.onerror = (event) => reject(event.target.error);
     });
+}
+
+// Replay session management
+const replaySessions = {};
+
+async function handleReplayMessages(request, sendResponse) {
+    try {
+        console.log('Starting replay with params:', {
+            start: new Date(request.startTimestamp),
+            end: request.endTimestamp ? new Date(request.endTimestamp) : 'none',
+            speed: request.speed
+        });
+        
+        // Make sure we have the database
+        if (!messageStoreDB) {
+            sendResponse({ error: 'Database not initialized' });
+            return;
+        }
+        
+        const result = await replayMessagesFromTimestamp(
+            request.startTimestamp,
+            request.endTimestamp || null,
+            request.speed || 1,
+            request.sessionId
+        );
+        
+        console.log('Replay started successfully:', result);
+        sendResponse(result);
+    } catch (error) {
+        console.error('Error in handleReplayMessages:', error);
+        sendResponse({ error: error.message || 'Unknown error occurred' });
+    }
+}
+
+function pauseReplay(sessionId) {
+    if (replaySessions[sessionId]) {
+        replaySessions[sessionId].isPaused = true;
+    }
+}
+
+function resumeReplay(sessionId) {
+    if (replaySessions[sessionId]) {
+        replaySessions[sessionId].isPaused = false;
+    }
+}
+
+function stopReplay(sessionId) {
+    if (replaySessions[sessionId]) {
+        // Clear all pending timeouts
+        replaySessions[sessionId].timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+        delete replaySessions[sessionId];
+    }
+}
+
+function updateReplaySpeed(sessionId, newSpeed) {
+    if (replaySessions[sessionId]) {
+        // This would require re-calculating timeouts, which is complex
+        // For now, just update the speed for future reference
+        replaySessions[sessionId].speed = newSpeed;
+    }
 }
 
 
@@ -3887,6 +4369,146 @@ function sendToH2R(data) {
         }
     }
 }
+
+const WEBHOOK_RELAY_SOURCES = new Set(["stripe", "kofi", "bmac", "fourthwall"]);
+
+function normalizeWebhookRelayUrl(rawUrl) {
+    if (!rawUrl) {
+        return null;
+    }
+
+    let url = String(rawUrl).trim();
+    if (!url) {
+        return null;
+    }
+
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        return url;
+    }
+
+    if (url.startsWith("127.0.0.1") || url.startsWith("localhost")) {
+        return "http://" + url;
+    }
+
+    return "https://" + url;
+}
+
+function getWebhookRelayEndpoints(settings) {
+    if (!settings) {
+        return [];
+    }
+
+    const endpoints = new Set();
+
+    Object.keys(settings).forEach(key => {
+        if (!key.startsWith("webhookrelayurl")) {
+            return;
+        }
+
+        const entry = settings[key];
+        const rawValue = typeof entry === "string" ? entry : entry?.textsetting;
+        if (typeof rawValue !== "string") {
+            return;
+        }
+
+        const normalized = normalizeWebhookRelayUrl(rawValue);
+        if (normalized) {
+            endpoints.add(normalized);
+        }
+    });
+
+    return Array.from(endpoints);
+}
+
+function relayIncomingWebhook(source, payload) {
+    if (!WEBHOOK_RELAY_SOURCES.has(source)) {
+        return;
+    }
+    if (!settings.webhookrelay) {
+        return;
+    }
+    if (!payload) {
+        return;
+    }
+
+    const endpoints = getWebhookRelayEndpoints(settings);
+    if (endpoints.length === 0) {
+        return;
+    }
+
+    let requestInit;
+
+    if (source === "kofi") {
+        if (typeof payload !== "object") {
+            console.warn("[WebhookRelay] Unexpected Ko-fi payload type", typeof payload);
+            return;
+        }
+
+        const params = new URLSearchParams();
+        Object.entries(payload).forEach(([key, value]) => {
+            if (value === undefined || value === null) {
+                return;
+            }
+
+            let stringValue = String(value);
+            if (key === "data") {
+                try {
+                    stringValue = decodeURIComponent(stringValue.replace(/\+/g, " "));
+                } catch (e) {
+                    stringValue = String(value);
+                }
+            }
+
+            params.append(key, stringValue);
+        });
+
+        requestInit = {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-SSN-Webhook-Source": source
+            },
+            body: params.toString()
+        };
+    } else {
+        let body;
+        let contentType = "application/json";
+
+        if (typeof payload === "string") {
+            body = payload;
+            contentType = "text/plain";
+        } else {
+            try {
+                body = JSON.stringify(payload);
+            } catch (e) {
+                console.warn(`[WebhookRelay] Failed to serialize payload for ${source}:`, e);
+                return;
+            }
+        }
+
+        requestInit = {
+            method: "POST",
+            headers: {
+                "Content-Type": contentType,
+                "X-SSN-Webhook-Source": source
+            },
+            body
+        };
+    }
+
+    endpoints.forEach(endpoint => {
+        try {
+            const init = {
+                ...requestInit,
+                headers: { ...requestInit.headers }
+            };
+            fetch(endpoint, init).catch(err => console.warn(`[WebhookRelay] Request failed for ${source} -> ${endpoint}:`, err));
+        } catch (err) {
+            console.warn(`[WebhookRelay] Unexpected error relaying ${source} -> ${endpoint}:`, err);
+        }
+    });
+}
+
 function sanitizeRelay(text, textonly=false, alt = false) {
     if (!text || !text.trim()) {
         return alt || text;
@@ -4074,7 +4696,8 @@ function sendToS10(data, fakechat=false, relayed=false) {
 				return;
 			}
 			
-			if (data.chatmessage.includes(miscTranslations.said)){
+			const checkMessage = data.textContent || data.chatmessage;
+			if (checkMessage.includes(miscTranslations.said)){
 				return null;
 			}
 
@@ -4088,6 +4711,9 @@ function sendToS10(data, fakechat=false, relayed=false) {
 			if (!cleaned){
 				return;
 			}
+			
+			// Store the cleaned text content for reuse elsewhere
+			data.textContent = cleaned;
 			
 			if (relayed && !verifyOriginalNewIncomingMessage(cleaned, true)){
 				if (data.bot) {
@@ -4681,8 +5307,9 @@ function sendToStreamerBot(data, fakechat = false, relayed = false) {
     }
 
     // Skip messages that contain certain translations or empty messages
+    const checkMessage = data.textContent || data.chatmessage;
     if (!data.chatmessage ||
-        (data.chatmessage.includes && data.chatmessage.includes(miscTranslations.said))) {
+        (checkMessage.includes && checkMessage.includes(miscTranslations.said))) {
       return null;
     }
 
@@ -4698,6 +5325,9 @@ function sendToStreamerBot(data, fakechat = false, relayed = false) {
     if (!cleaned) {
       return;
     }
+    
+    // Store the cleaned text content for reuse elsewhere
+    data.textContent = cleaned;
 
     // Duplicate message handling logic (assuming functions are defined elsewhere)
     if (relayed && typeof verifyOriginalNewIncomingMessage === 'function' && !verifyOriginalNewIncomingMessage(cleaned, true)) {
@@ -5074,6 +5704,61 @@ function sendToPost(data) {
 	}
 }
 
+// Initialize Spotify integration
+function initializeSpotify() {
+	if (!spotify) {
+		// Check if SpotifyIntegration is available
+		if (typeof SpotifyIntegration !== 'undefined') {
+			console.log("Creating new SpotifyIntegration instance");
+			spotify = new SpotifyIntegration();
+		} else if (window.SpotifyIntegration) {
+			console.log("Creating new window.SpotifyIntegration instance");
+			spotify = new window.SpotifyIntegration();
+		} else {
+			console.warn("SpotifyIntegration class not yet available, will retry...");
+			// Retry after a short delay
+			setTimeout(initializeSpotify, 500);
+			return;
+		}
+		
+		// Set up callbacks
+		const callbacks = {
+			onNewTrack: (track) => {
+				if (settings.spotifyAnnounceNewTrack) {
+					const message = settings.spotifyAnnounceFormat?.textsetting || "🎵 Now playing: {song} by {artist}";
+					const formattedMessage = spotify.formatTrackMessage(track, message);
+					
+					const data = {
+						chatname: settings.spotifyBotName?.textsetting || "Spotify Bot",
+						chatbadges: "",
+						backgroundColor: "",
+						textColor: "",
+						chatmessage: formattedMessage,
+						chatimg: track.imageUrl || "https://socialstream.ninja/icons/bot.png",
+						hasDonation: "",
+						membership: "",
+						isRelay: false,
+						type: "spotify",
+						bot: "spotify",
+						timestamp: Date.now()
+					};
+					
+					sendToDestinations(data);
+				}
+			}
+		};
+		
+		// Initialize with settings (async but we don't need to wait here)
+		spotify.initialize(settings, callbacks).catch(err => {
+			console.error("Failed to initialize Spotify:", err);
+		});
+	} else if (spotify && !settings.spotifyEnabled) {
+		// Clean up if disabled
+		spotify.cleanup();
+		spotify = null;
+	}
+}
+
 var socketserverDock = false;
 var serverURLDock = urlParams.has("localserver") ? "ws://127.0.0.1:3000" : "wss://io.socialstream.ninja/dock";
 var conConDock = 0; 
@@ -5104,41 +5789,62 @@ function setupSocketDock() {
 		socketserverDock.close();
 	};
 
-	socketserverDock.onclose = function () {
-		if ((settings.server2 || settings.server3) && isExtensionOn) {
-			reconnectionTimeoutDock = setTimeout(function () {
-				if ((settings.server2 || settings.server3) && isExtensionOn) {
-					conConDock += 1;
-					socketserverDock = new WebSocket(serverURLDock);
-					setupSocketDock();
-				} else {
-					socketserverDock = false;
-				}
-			}, 100 * conConDock);
-		} else {
-			socketserverDock = false;
-		}
-	};
+    socketserverDock.onclose = function () {
+        if ((settings.server2 || settings.server3) && isExtensionOn) {
+            // Fast first retry, then exponential backoff with jitter (cap 30s)
+            const nextAttempt = Math.min(conConDock + 1, 10);
+            let delay;
+            if (nextAttempt === 1) {
+                delay = 50 + Math.floor(Math.random() * 100); // ~50–150ms
+            } else {
+                const base = Math.min(30000, 1000 * Math.pow(2, Math.min(nextAttempt - 1, 6)));
+                const jitter = Math.floor(Math.random() * 500);
+                delay = base + jitter;
+            }
+            conConDock = nextAttempt;
+            reconnectionTimeoutDock = setTimeout(function () {
+                if ((settings.server2 || settings.server3) && isExtensionOn) {
+                    socketserverDock = new WebSocket(serverURLDock);
+                    setupSocketDock();
+                } else {
+                    socketserverDock = false;
+                }
+            }, delay);
+        } else {
+            socketserverDock = false;
+        }
+    };
 	socketserverDock.onopen = function () {
 		conConDock = 0;
 		socketserverDock.send(JSON.stringify({ join: streamID, out: 4, in: 3 }));
 	};
-	socketserverDock.addEventListener("message", async function (event) {
-		if (event.data) {
-			try {
-				if (settings.server3 && isExtensionOn) {
-					try {
-						var data = JSON.parse(event.data);
-						processIncomingRequest(data);
-					} catch (e) {
-						console.error(e);
-					}
-				}
-			} catch (e) {
-				log(e);
-			}
-		}
-	});
+socketserverDock.addEventListener("message", async function (event) {
+    if (!event.data) { return; }
+    let data = null;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+
+    // Only handle inbound messages when allowed
+    if (!(settings.server3 && isExtensionOn)) { return; }
+
+    // Lightweight API: allow requesting a Hype snapshot and respond on the same paired channel
+    // Expected request formats:
+    //  - { action: "getHype", get: "token123" }
+    //  - { get: "hype" }  // shorthand
+    if ((data && data.action === "getHype") || (data && data.get === "hype")) {
+        try {
+            const snapshot = combineHypeData();
+            const ret = { callback: { get: (data.get || "hype"), result: { hype: snapshot } } };
+            socketserverDock && socketserverDock.send(JSON.stringify(ret));
+        } catch (e) { console.warn("Failed to respond to getHype on /dock", e); }
+        return; // handled
+    }
+
+    try {
+        processIncomingRequest(data);
+    } catch (e) {
+        console.error(e);
+    }
+});
 }
 //
 
@@ -5172,47 +5878,72 @@ function setupSocket() {
 		socketserver.close();
 	};
 
-	socketserver.onclose = function () {
-		if (settings.socketserver && isExtensionOn) {
-			reconnectionTimeout = setTimeout(function () {
-				if (settings.socketserver && isExtensionOn) {
-					conCon += 1;
-					setupSocket();
-				} else {
-					socketserver = false;
-				}
-			}, 100 * conCon);
-		} else {
-			socketserver = false;
-		}
-	};
+    socketserver.onclose = function () {
+        if (settings.socketserver && isExtensionOn) {
+            // Fast first retry, then exponential backoff with jitter (cap 30s)
+            const nextAttempt = Math.min(conCon + 1, 10);
+            let delay;
+            if (nextAttempt === 1) {
+                delay = 50 + Math.floor(Math.random() * 100); // ~50–150ms
+            } else {
+                const base = Math.min(30000, 1000 * Math.pow(2, Math.min(nextAttempt - 1, 6)));
+                const jitter = Math.floor(Math.random() * 500);
+                delay = base + jitter;
+            }
+            conCon = nextAttempt;
+            reconnectionTimeout = setTimeout(function () {
+                if (settings.socketserver && isExtensionOn) {
+                    setupSocket();
+                } else {
+                    socketserver = false;
+                }
+            }, delay);
+        } else {
+            socketserver = false;
+        }
+    };
 	socketserver.onopen = function () {
 		conCon = 0;
 		socketserver.send(JSON.stringify({ join: streamID, out: 2, in: 1 }));
 	};
-	socketserver.addEventListener("message", async function (event) {
-		if (event.data) {
-			var resp = false;
+socketserver.addEventListener("message", async function (event) {
+    if (event.data) {
+        var resp = false;
 
-			try {
-				var data = JSON.parse(event.data);
-			} catch (e) {
-				console.error(e);
-				return;
-			}
-			
-			if (data.target && (data.target==='null')){
-				data.target = "";
-			}
-			
-			console.log(data.kofi);
+        let data;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            console.error(e);
+            return;
+        }
 
-			if (data.action && data.action === "sendChat" && data.value) {
+        // Lightweight API: allow requesting a Hype snapshot and respond on the same paired channel
+        // Expected request formats:
+        //  - { action: "getHype", get: "token123" }
+        //  - { get: "hype" }  // shorthand
+        try {
+            if ((data && data.action === "getHype") || (data && data.get === "hype")) {
+                try {
+                    const snapshot = combineHypeData();
+                    const ret = { callback: { get: (data.get || "hype"), result: { hype: snapshot } } };
+                    socketserver && socketserver.send(JSON.stringify(ret));
+                } catch (e) { console.warn("Failed to respond to getHype on /api", e); }
+                return; // handled
+            }
+        } catch (e) { /* ignore */ }
+
+        if (data.target && (data.target==='null')){
+            data.target = "";
+        }
+
+		if (data.action && data.action === "sendChat" && data.value) {
 				var msg = {};
 				msg.response = data.value;
 				if (data.target) {
 					msg.destination = data.target;
 				}
+				msg.outgoingOrigin = 'host';
 				resp = sendMessageToTabs(msg, false, null, false, false, false);
 			} else if (data.action && data.action === "sendEncodedChat" && data.value) {
 				var msg = {};
@@ -5277,6 +6008,36 @@ function setupSocket() {
 			} else if (data.action && data.action === "closepoll") {
 				sendTargetP2P({cmd:"closepoll"},"poll");
 				resp = true;
+			} else if (data.action && data.action === "loadpoll") {
+				// Load a saved poll preset by ID
+				if (data.value && data.value.pollId) {
+					loadPollPreset(data.value.pollId);
+					resp = true;
+				}
+			} else if (data.action && data.action === "setpollsettings") {
+				// Directly set poll settings via API
+				if (data.value && typeof data.value === 'object') {
+					updatePollSettings(data.value);
+					resp = true;
+				}
+			} else if (data.action && data.action === "getpollpresets") {
+				// Return list of saved poll presets
+				getPollPresets(function(presets) {
+					if (data.get && e.data.UUID) {
+						var ret = {};
+						ret.callback = {};
+						ret.callback.get = data.get;
+						ret.callback.result = presets;
+						socketserver.send(JSON.stringify(ret));
+					}
+				});
+				resp = true;
+			} else if (data.action && data.action === "createpoll") {
+				// Create a new poll with specific settings
+				if (data.value && data.value.settings) {
+					createNewPoll(data.value.settings);
+					resp = true;
+				}
 			} else if (data.action && data.action === "stopentries") {
 				toggleEntries(false);
 				resp = true;
@@ -5309,6 +6070,8 @@ function setupSocket() {
 					}
 					
 					console.log(data.stripe);
+
+					relayIncomingWebhook("stripe", data.stripe);
 
 					var message = {};
 					message.chatname = "";
@@ -5435,6 +6198,8 @@ function setupSocket() {
 					if (!data.kofi.data) {
 						return false;
 					}
+
+					relayIncomingWebhook("kofi", data.kofi);
 					try {
 						var kofi = JSON.parse(decodeURIComponent(data.kofi.data).replace(/\+/g, " "));
 					} catch (e) {
@@ -5509,6 +6274,7 @@ function setupSocket() {
 					}
 					else {
 						var bmac = data.bmac; 
+						relayIncomingWebhook("bmac", data.bmac);
 						var message = {};
 						if (bmac.type === "membership.started") {
 							message.chatname = bmac.data.supporter_name || "Anonymous"; 
@@ -5569,6 +6335,8 @@ function setupSocket() {
 				if (!data.fourthwall.data || data.fourthwall.type !== "ORDER_PLACED") {
 				  return false;
 				}
+				
+				relayIncomingWebhook("fourthwall", data.fourthwall);
 				
 				const fourthwallData = data.fourthwall.data;
 				
@@ -5941,9 +6709,9 @@ async function openchat(target = null, force = false) {
 }
 
 function sendDataP2P(data, UUID = false) {
-	// function to send data to the DOCk via the VDO.Ninja API
+    // function to send data to the DOCk via the VDO.Ninja API
 
-	if (!UUID && settings.server2 && socketserverDock && (socketserverDock.readyState===1)) {
+    if (!UUID && settings.server2 && socketserverDock && (socketserverDock.readyState===1)) {
 		try {
 			if (data.out){
 				delete data.out;
@@ -5956,14 +6724,38 @@ function sendDataP2P(data, UUID = false) {
 		}
 	}
 
-	var msg = {};
-	msg.overlayNinja = data;
+    var msg = {};
+    msg.overlayNinja = data;
 
-	if (iframe) {
-		if (UUID && connectedPeers) {
-			try {
-				iframe.contentWindow.postMessage({ sendData: { overlayNinja: data }, type: "pcs", UUID: UUID }, "*");
-			} catch (e) {
+    // Prefer SDK transport if active
+    if (ninjaBridge && ninjaBridge.isReady()) {
+        try {
+            if (UUID) {
+                ninjaBridge.send(data, UUID);
+                return;
+            }
+            // Prefer sending to docks; if none known yet, broadcast
+            var hasDock = false;
+            try {
+                var peers = ninjaBridge.getPeers();
+                for (var k in peers) { if (peers[k] === 'dock') { hasDock = true; break; } }
+            } catch(e){}
+            if (hasDock) {
+                ninjaBridge.sendToLabel(data, 'dock');
+            } else {
+                ninjaBridge.send(data); // broadcast
+            }
+            return;
+        } catch (e) {
+            console.warn('SDK sendDataP2P failed; falling back to iframe', e);
+        }
+    }
+
+    if (iframe) {
+        if (UUID && connectedPeers) {
+            try {
+                iframe.contentWindow.postMessage({ sendData: { overlayNinja: data }, type: "pcs", UUID: UUID }, "*");
+            } catch (e) {
 				console.error(e);
 			}
 		} else if (connectedPeers) {
@@ -6151,7 +6943,18 @@ function combineHypeData() {
     return result;
 }
 function sendHypeP2P(data, uid = null) {
-  // function to send data to the DOCK via the VDO.Ninja API
+  // function to send data to the HYPE overlay via the transport
+  if (ninjaBridge && ninjaBridge.isReady()) {
+    try {
+      if (!uid) {
+        ninjaBridge.sendToLabel({ hype: data }, 'hype');
+      } else {
+        ninjaBridge.send({ hype: data }, uid);
+      }
+      return;
+    } catch (e) { console.warn('SDK sendHypeP2P failed', e); }
+  }
+
   if (iframe) {
     if (!uid) {
       var keys = Object.keys(connectedPeers);
@@ -6174,44 +6977,61 @@ function sendHypeP2P(data, uid = null) {
 }
 //////
 function sendTargetP2P(data, target) {
-	// function to send data to the DOCk via the VDO.Ninja API
+    // function to send data to the DOCk via the VDO.Ninja API
+    if (ninjaBridge && ninjaBridge.isReady()) {
+        try {
+            ninjaBridge.sendToLabel(data, target);
+            return;
+        } catch (e) { console.warn('SDK sendTargetP2P failed', e); }
+    }
 
-	if (iframe) {
-		var keys = Object.keys(connectedPeers);
-		for (var i = 0; i < keys.length; i++) {
-			try {
-				var UUID = keys[i];
-				var label = connectedPeers[UUID];
-				if (label === target) {
-					iframe.contentWindow.postMessage({ sendData: { overlayNinja: data }, type: "pcs", UUID: UUID }, "*");
-				}
-			} catch (e) {}
-		}
-	
-	}
+    if (iframe) {
+        var keys = Object.keys(connectedPeers);
+        for (var i = 0; i < keys.length; i++) {
+            try {
+                var UUID = keys[i];
+                var label = connectedPeers[UUID];
+                if (label === target) {
+                    iframe.contentWindow.postMessage({ sendData: { overlayNinja: data }, type: "pcs", UUID: UUID }, "*");
+                }
+            } catch (e) {}
+        }
+    
+    }
 }
 function sendTickerP2P(data, uid = null) {
-	// function to send data to the DOCk via the VDO.Ninja API
+    // function to send data to the DOCk via the VDO.Ninja API
 
-	if (iframe) {
-		if (!uid) {
-			var keys = Object.keys(connectedPeers);
-			for (var i = 0; i < keys.length; i++) {
-				try {
-					var UUID = keys[i];
-					var label = connectedPeers[UUID];
-					if (label === "ticker") {
-						iframe.contentWindow.postMessage({ sendData: { overlayNinja: { ticker: data } }, type: "pcs", UUID: UUID }, "*");
-					}
-				} catch (e) {}
-			}
-		} else {
-			var label = connectedPeers[uid];
-			if (label === "ticker") {
-				iframe.contentWindow.postMessage({ sendData: { overlayNinja: { ticker: data } }, type: "pcs", UUID: uid }, "*");
-			}
-		}
-	}
+    if (ninjaBridge && ninjaBridge.isReady()) {
+        try {
+            if (!uid) {
+                ninjaBridge.sendToLabel({ ticker: data }, 'ticker');
+            } else {
+                ninjaBridge.send({ ticker: data }, uid);
+            }
+            return;
+        } catch (e) { console.warn('SDK sendTickerP2P failed', e); }
+    }
+
+    if (iframe) {
+        if (!uid) {
+            var keys = Object.keys(connectedPeers);
+            for (var i = 0; i < keys.length; i++) {
+                try {
+                    var UUID = keys[i];
+                    var label = connectedPeers[UUID];
+                    if (label === "ticker") {
+                        iframe.contentWindow.postMessage({ sendData: { overlayNinja: { ticker: data } }, type: "pcs", UUID: UUID }, "*");
+                    }
+                } catch (e) {}
+            }
+        } else {
+            var label = connectedPeers[uid];
+            if (label === "ticker") {
+                iframe.contentWindow.postMessage({ sendData: { overlayNinja: { ticker: data } }, type: "pcs", UUID: uid }, "*");
+            }
+        }
+    }
 }
 
 //////////
@@ -6292,6 +7112,95 @@ function initializePoll() {
 			sendTargetP2P({settings:settings}, "poll");
 		}
 	} catch (e) {}
+}
+
+function loadPollPreset(pollId) {
+	chrome.storage.local.get(['savedPolls'], function(result) {
+		if (result.savedPolls) {
+			try {
+				const savedPolls = JSON.parse(result.savedPolls);
+				const poll = savedPolls.find(p => p.id === pollId);
+				if (poll && poll.settings) {
+					// Update settings with the loaded poll
+					Object.keys(poll.settings).forEach(key => {
+						if (settings.hasOwnProperty(key)) {
+							settings[key] = poll.settings[key];
+						}
+					});
+					// Send updated settings to poll overlay
+					sendTargetP2P({settings:settings}, "poll");
+					// Save updated settings
+					chrome.storage.local.set({settings: settings});
+				}
+			} catch (e) {
+				log("Error loading poll preset: " + e.message);
+			}
+		}
+	});
+}
+
+function updatePollSettings(newSettings) {
+	try {
+		// Update poll-related settings
+		const pollKeys = ['pollType', 'pollQuestion', 'multipleChoiceOptions', 
+						 'pollStyle', 'pollTimer', 'pollTimerState', 'pollTally', 'pollSpam'];
+		
+		pollKeys.forEach(key => {
+			if (newSettings.hasOwnProperty(key)) {
+				settings[key] = newSettings[key];
+			}
+		});
+		
+		// Send updated settings to poll overlay
+		sendTargetP2P({settings:settings}, "poll");
+		// Save settings
+		chrome.storage.local.set({settings: settings});
+	} catch (e) {
+		log("Error updating poll settings: " + e.message);
+	}
+}
+
+function getPollPresets(callback) {
+	chrome.storage.local.get(['savedPolls'], function(result) {
+		try {
+			if (result.savedPolls) {
+				const savedPolls = JSON.parse(result.savedPolls);
+				// Return simplified list with id and name
+				const presets = savedPolls.map(poll => ({
+					id: poll.id,
+					name: poll.name
+				}));
+				callback(presets);
+			} else {
+				callback([]);
+			}
+		} catch (e) {
+			log("Error getting poll presets: " + e.message);
+			callback([]);
+		}
+	});
+}
+
+function createNewPoll(pollSettings) {
+	try {
+		// Reset to default poll settings
+		const defaultSettings = {
+			pollType: 'freeform',
+			pollQuestion: '',
+			multipleChoiceOptions: '',
+			pollStyle: 'default',
+			pollTimer: '60',
+			pollTimerState: false,
+			pollTally: true,
+			pollSpam: false
+		};
+		
+		// Merge with provided settings
+		const finalSettings = {...defaultSettings, ...pollSettings};
+		updatePollSettings(finalSettings);
+	} catch (e) {
+		log("Error creating new poll: " + e.message);
+	}
 }
 
 function initializeWaitlist() {
@@ -6588,30 +7497,163 @@ function sendToDisk(data) {
 	}
 }
 
-function loadIframe(streamID, pass = false) {
+async function initTransport(streamID, pass = false) {
 	// this is pretty important if you want to avoid camera permission popup problems.  You can also call it automatically via: <body onload=>loadIframe();"> , but don't call it before the page loads.
-	log("LOAD IFRAME VDON BG");
 
-	var lanonly = "";
-	if (settings["lanonly"]) {
-		lanonly = "&lanonly";
-	}
+    // Re-evaluate effective SDK flag each init, based on flexible truthy parsing
+    try {
+        const raw = (settings && (settings.sdk !== undefined ? settings.sdk : settings.usesdk));
+        let flag = false;
+        if (typeof raw === 'boolean') {
+            flag = raw;
+        } else if (raw && typeof raw === 'object') {
+            // supports { setting: true/"true"/1 }
+            const v = raw.setting;
+            flag = (v === true) || (v === 1) || (typeof v === 'string' && /^(1|true|on|yes)$/i.test(v));
+        } else if (typeof raw === 'string') {
+            flag = /^(1|true|on|yes)$/i.test(raw);
+        } else if (raw === 1) {
+            flag = true;
+        }
+        useNinjaSDK = !!flag;
+    } catch(e) { useNinjaSDK = false; }
 
-	if (iframe) {
-		if (!pass) {
-			pass = "false";
-		}
-		//iframe.allow = "document-domain;encrypted-media;sync-xhr;usb;web-share;cross-origin-isolated;accelerometer;midi;geolocation;autoplay;camera;microphone;fullscreen;picture-in-picture;display-capture;";
-		iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&password=" + pass + lanonly + "&room=" + streamID + "&push=" + streamID + "&vd=0&ad=0&autostart&cleanoutput&view&label=SocialStream"; // don't listen to any inbound events
-	} else {
-		iframe = document.createElement("iframe");
-		//iframe.allow =  "document-domain;encrypted-media;sync-xhr;usb;web-share;cross-origin-isolated;accelerometer;midi;geolocation;autoplay;camera;microphone;fullscreen;picture-in-picture;display-capture;";
-		if (!pass) {
-			pass = "false";
-		}
-		iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&password=" + pass + lanonly + "&room=" + streamID + "&push=" + streamID + "&vd=0&ad=0&autostart&cleanoutput&view&label=SocialStream"; // don't listen to any inbound events
-		document.body.appendChild(iframe);
-	}
+	log("Init transport for VDO", useNinjaSDK ? "SDK" : "IFRAME");
+
+    // If SDK is enabled and available, use it (lazy-load SDK/bridge if needed)
+    if (useNinjaSDK) {
+        try {
+            // Lazy load SDK and bridge if not present
+            await ensureNinjaSDKLoaded();
+            if (typeof NinjaBridge === 'undefined') throw new Error('NinjaBridge unavailable');
+            // Clean any existing iframe (graceful teardown to release streamID)
+            if (iframe) {
+                try { iframe.src = 'about:blank'; } catch(e){}
+                // allow the page to close sockets cleanly
+                try { await new Promise(r => setTimeout(r, 300)); } catch(e){}
+                try { iframe.remove(); } catch(e){}
+                iframe = null;
+            }
+            // Reuse existing bridge if room changes? Destroy and recreate for safety
+            if (ninjaBridge) {
+                try { await ninjaBridge.destroy(); } catch(e){}
+                ninjaBridge = null;
+            }
+            // short wait to let signaling release prior streamID
+            try { await new Promise(r => setTimeout(r, 600)); } catch(e){}
+            ninjaBridge = new NinjaBridge({ debug: devmode });
+            try { window.ninjaBridge = ninjaBridge; } catch(e){}
+            ninjaBridge.addEventListener('peerLabel', (ev) => {
+                try {
+                    const { uuid, label } = ev.detail || {};
+                    if (!uuid || !label) return;
+                    // Call initializers similar to iframe message handling
+                    if (label === 'hype') {
+                        try { processHype2(); } catch(e){}
+                    } else if (label === 'ticker') {
+                        try { processTicker(); } catch(e){}
+                    } else if (label === 'waitlist') {
+                        try { initializeWaitlist(); } catch(e){}
+                    } else if (label === 'poll') {
+                        try { initializePoll(); } catch(e){}
+                    }
+                } catch (e) { console.warn(e); }
+            });
+            // Try initializing SDK; if it fails (eg, streamID still in use), retry once
+            try {
+                await ninjaBridge.init({ room: streamID, password: pass, streamID: streamID });
+            } catch (e1) {
+                console.warn('SDK init failed; retrying after short delay…', e1?.message || e1);
+                try { await new Promise(r => setTimeout(r, 900)); } catch(e){}
+                try { await ninjaBridge.destroy(); } catch(e){}
+                ninjaBridge = new NinjaBridge({ debug: devmode });
+                try { window.ninjaBridge = ninjaBridge; } catch(e){}
+                ninjaBridge.addEventListener('peerLabel', (ev) => {
+                    try {
+                        const { uuid, label } = ev.detail || {};
+                        if (!uuid || !label) return;
+                        if (label === 'hype') { try { processHype2(); } catch(e){} }
+                        else if (label === 'ticker') { try { processTicker(); } catch(e){} }
+                        else if (label === 'waitlist') { try { initializeWaitlist(); } catch(e){} }
+                        else if (label === 'poll') { try { initializePoll(); } catch(e){} }
+                    } catch (e) { console.warn(e); }
+                });
+                await ninjaBridge.init({ room: streamID, password: pass, streamID: streamID });
+            }
+            try {
+                // Receive overlay messages via SDK (support both event names and wrapper passthrough)
+                const handleSDKData = (ev) => {
+                    try {
+                        const pkt = ev.detail && (ev.detail.data || ev.detail);
+                        const data = pkt && (pkt.detail?.data || pkt.data || pkt);
+                        const uuid = ev.detail && (ev.detail.uuid || ev.detail.peer || ev.detail.id);
+                        if (!data) return;
+                        if (data.overlayNinja) {
+                            processIncomingRequest(data.overlayNinja, uuid);
+                        }
+                    } catch(e) { console.warn(e); }
+                };
+                ninjaBridge.vdo.addEventListener('data', handleSDKData);
+                ninjaBridge.vdo.addEventListener('dataReceived', handleSDKData);
+                ninjaBridge.addEventListener('data', handleSDKData);
+            } catch (e) { console.warn(e); }
+            return; // success
+        } catch (e) {
+            console.warn('Falling back to iframe transport:', e);
+            // If SDK fails, fall through to iframe
+        }
+    }
+
+    // IFRAME fallback
+    // Ensure SDK bridge is torn down before creating iframe, to avoid streamID collision
+    if (ninjaBridge) {
+        try { await ninjaBridge.destroy(); } catch(e){}
+        ninjaBridge = null;
+        try { window.ninjaBridge = null; } catch(e){}
+        // small delay to allow signaling server to release streamID
+        try { await new Promise(r => setTimeout(r, 600)); } catch(e){}
+    }
+    var lanonly = "";
+    try { if (settings["lanonly"]) { lanonly = "&lanonly"; } } catch(e){}
+    if (iframe) {
+        if (!pass) { pass = "false"; }
+        iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&password=" + pass + lanonly + "&room=" + streamID + "&push=" + streamID + "&vd=0&ad=0&autostart&cleanoutput&view&label=SocialStream";
+    } else {
+        iframe = document.createElement("iframe");
+        if (!pass) { pass = "false"; }
+        iframe.src = "https://vdo.socialstream.ninja/?ln&salt=vdo.ninja&password=" + pass + lanonly + "&room=" + streamID + "&push=" + streamID + "&vd=0&ad=0&autostart&cleanoutput&view&label=SocialStream";
+        document.body.appendChild(iframe);
+    }
+}
+
+// Lazy-load VDO.Ninja SDK and NinjaBridge only when needed
+async function ensureNinjaSDKLoaded() {
+    function dynamicLoadScript(src) {
+        return new Promise((resolve, reject) => {
+            try {
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = () => resolve();
+                s.onerror = (e) => reject(e);
+                document.body.appendChild(s);
+            } catch (e) { reject(e); }
+        });
+    }
+
+    if (typeof window.VDONinjaSDK === 'undefined') {
+        if (typeof window.loadScript === 'function') {
+            await window.loadScript('./thirdparty/vdoninja-sdk.js');
+        } else {
+            await dynamicLoadScript('./thirdparty/vdoninja-sdk.js');
+        }
+    }
+    if (typeof window.NinjaBridge === 'undefined') {
+        if (typeof window.loadScript === 'function') {
+            await window.loadScript('./js/ninja-transport.js');
+        } else {
+            await dynamicLoadScript('./js/ninja-transport.js');
+        }
+    }
 }
 
 var eventMethod = window.addEventListener ? "addEventListener" : "attachEvent"; // lets us listen to the VDO.Ninja IFRAME API; ie: lets us talk to the dock
@@ -6690,7 +7732,18 @@ async function processIncomingRequest(request, UUID = false) { // from the dock 
 	} else if ("action" in request) {
 		if (request.action === "openChat") {
 			openchat(request.value || null);
-		} else if (request.action === "getUserHistory" && request.value && request.value.chatname && request.value.type) {
+		} else if (request.action === "skipTTS") {
+			// Skip the currently playing TTS message
+			chrome.tabs.query({}, function(tabs) {
+				tabs.forEach(tab => {
+					chrome.tabs.sendMessage(tab.id, {skipTTS: true}, function() {
+						if (chrome.runtime.lastError) {
+							// Tab doesn't have content script loaded, ignore
+						}
+					});
+				});
+			});
+	} else if (request.action === "getUserHistory" && request.value && request.value.chatname && request.value.type) {
 			if (isExtensionOn) {
 				getMessagesDB(request.value.userid || request.value.chatname, request.value.type, (page = 0), (pageSize = 100), function (response) {
 					if (isExtensionOn) {
@@ -6862,12 +7915,24 @@ async function processIncomingRequest(request, UUID = false) { // from the dock 
 				  }, controller, UUID, (request.images || null)).then((fullResponse) => {
 					sendDataP2P({ chatbotResponse: {value: fullResponse, target: request.target}}, UUID);
 				  }).catch((error) => {
-					console.error('Error in callLLMAPI:', error);
-					sendDataP2P({ chatbotResponse: {value: JSON.stringify(error), target: request.target}}, UUID);
+					let payload;
+					if (typeof LLMServiceError !== 'undefined' && error instanceof LLMServiceError) {
+						payload = {
+							provider: error.provider,
+							status: error.status,
+							code: error.code,
+							message: error.message,
+							hint: error.hint || null
+						};
+					} else {
+						console.error('Error in callLLMAPI:', error);
+						payload = { message: error?.message || 'Unknown error' };
+					}
+					sendDataP2P({ chatbotResponse: { value: JSON.stringify({ error: payload }), target: request.target }}, UUID);
 				  });
 				} catch(e) {
 				  console.error('Unexpected error:', e);
-				  sendDataP2P({ chatbotResponse: {value: JSON.stringify(e), target: request.target}}, UUID);
+				  sendDataP2P({ chatbotResponse: { value: JSON.stringify({ error: { message: e?.message || 'Unexpected error' } }), target: request.target}}, UUID);
 				}
 			}
 		}
@@ -7267,24 +8332,24 @@ function delayedDetach(tabid) {
 }
 
 async function sendMessageToTabs(data, reverse = false, metadata = null, relayMode = false, antispam = false, overrideTimeout = 3500) {
-    console.log('[RELAY DEBUG - sendMessageToTabs] Called with:', {
-        data: data,
-        reverse: reverse,
-        metadata: metadata,
-        relayMode: relayMode,
-        antispam: antispam,
-        overrideTimeout: overrideTimeout,
-        isExtensionOn: isExtensionOn,
-        disablehost: settings.disablehost
-    });
+    // console.log('[RELAY DEBUG - sendMessageToTabs] Called with:', {
+    //     data: data,
+    //     reverse: reverse,
+    //     metadata: metadata,
+    //     relayMode: relayMode,
+    //     antispam: antispam,
+    //     overrideTimeout: overrideTimeout,
+    //     isExtensionOn: isExtensionOn,
+    //     disablehost: settings.disablehost
+    // });
     
     if (!chrome.debugger || !isExtensionOn || settings.disablehost) {
-        console.log('[RELAY DEBUG - sendMessageToTabs] Early return - Extension off or host disabled');
+        // console.log('[RELAY DEBUG - sendMessageToTabs] Early return - Extension off or host disabled');
         return false;
     }
 
 	if (!data.response){
-		console.log('[RELAY DEBUG - sendMessageToTabs] Early return - No response in data');
+		// console.log('[RELAY DEBUG - sendMessageToTabs] Early return - No response in data');
 		return false;
 	}
     if (antispam && settings["dynamictiming"] && lastAntiSpam + 10 > messageCounter) {
@@ -7297,7 +8362,9 @@ async function sendMessageToTabs(data, reverse = false, metadata = null, relayMo
         }
     }
     const now = Date.now();
-    
+
+    const messageOrigin = data.outgoingOrigin || (data.bot ? 'chatbot' : (data.host ? 'host' : 'relay'));
+
     if (!reverse && !overrideTimeout && data.tid) { // we do this early to avoid the blue bar if not needed
         if (data.tid in messageTimeout) {
             if (now - messageTimeout[data.tid] < overrideTimeout) {
@@ -7319,104 +8386,153 @@ async function sendMessageToTabs(data, reverse = false, metadata = null, relayMo
     try {
 		
         const tabs = await new Promise(resolve => chrome.tabs.query({}, resolve));
-        console.log(`[RELAY DEBUG - sendMessageToTabs] Found ${tabs.length} tabs`);
+        // console.log(`[RELAY DEBUG - sendMessageToTabs] Found ${tabs.length} tabs`);
         var published = {};
-		
+        let processedAnyTab = false;  // Track if we processed any tabs with destination filter
         
+        // Helper function to process a tab
+        const processTab = async (tab) => {
+            // console.log(`[RELAY DEBUG - sendMessageToTabs] Processing valid tab ${tab.id}: ${tab.url?.substring(0, 50)}...`);
+            processedAnyTab = true;  // Mark that we found at least one valid tab
+
+            // Handle message store
+            if (msg2Save) {  
+                handleMessageStore(tab.id, msg2Save, now, relayMode, messageOrigin);
+            }
+
+            published[tab.url] = true;
+                
+            // Handle different site types
+            if (tab.url.includes(".stageten.tv") && settings.s10apikey && settings.s10) {
+                // we will handle this on its own.
+                return;
+            } else if (tab.url.startsWith("https://www.twitch.tv/popout/")) {
+                let restxt = data.response.length > 500 ? data.response.substring(0, 500) : data.response;
+                await attachAndChat(tab.id, restxt, false, true, false, false, overrideTimeout);
+            } else if (tab.url.startsWith("https://boltplus.tv/")) {
+                await attachAndChat(tab.id, data.response, false, true, true, true, overrideTimeout);
+            } else if (tab.url.startsWith("https://rumble.com/")) {
+                await attachAndChat(tab.id, data.response, true, true, false, false, overrideTimeout);
+            } else if (tab.url.startsWith("https://app.chime.aws/meetings/")) {
+                await attachAndChat(tab.id, data.response, false, true, true, false, overrideTimeout);
+            } else if (tab.url.startsWith("https://kick.com/")) {
+                let restxt = data.response.length > 500 ? data.response.substring(0, 500) : data.response;
+                if (isSSAPP){
+                    await attachAndChat(tab.id, " "+restxt, false, true, true, false, overrideTimeout);
+                } else {
+                    await attachAndChat(tab.id, restxt, false, true, true, false, overrideTimeout);
+                }
+            } else if (tab.url.startsWith("https://app.slack.com")) {
+                await attachAndChat(tab.id, data.response, true, true, true, false, overrideTimeout); 
+            } else if (tab.url.startsWith("https://app.zoom.us/")) {
+                await attachAndChat(tab.id, data.response, false, true, false, false, overrideTimeout, zoomFakeChat);
+                return;
+            } else {
+                // Generic handler
+                if (tab.url.includes("youtube.com/live_chat")) {
+                    getYoutubeAvatarImage(tab.url, true);
+                    let restxt = data.response;
+                    
+                    if (restxt.length > 200){
+                        restxt = restxt.substring(0, 200);
+                        var ignore = checkExactDuplicateAlreadyRelayed(restxt, false, false, true); 
+                        if (ignore) {  
+                            handleMessageStore(tab.id, ignore, now, relayMode, messageOrigin);
+                        }
+                    }
+                    
+                    await attachAndChat(tab.id, restxt, true, true, false, false, overrideTimeout);
+                    return;
+                }
+                
+                if (tab.url.includes("tiktok.com")) {
+                    let tiktokMessage = data.response;
+                    
+                    if (settings.notiktoklinks){
+                        tiktokMessage = replaceURLsWithSubstring(tiktokMessage, "");
+                    }
+                    let restxt = tiktokMessage.length > 150 ? tiktokMessage.substring(0, 150) : tiktokMessage;
+                    
+                    if (restxt!==data.response){
+                        var ignore = checkExactDuplicateAlreadyRelayed(restxt, false, false, true); 
+                        if (ignore) {  
+                            handleMessageStore(tab.id, ignore, now, relayMode, messageOrigin);
+                        }
+                    }
+                    
+                    await attachAndChat(tab.id, restxt, true, true, false, false, overrideTimeout);
+                    return;
+                }
+                
+                await attachAndChat(tab.id, data.response, true, true, false, false, overrideTimeout);
+            }
+        };
+        
+        // First pass: try with source type matching
         for (const tab of tabs) {
             try {
                 // Skip invalid tabs
-				let isValid = await isValidTab(tab, data, reverse, published, now, overrideTimeout, relayMode);
+                let isValid = await isValidTab(tab, data, reverse, published, now, overrideTimeout, relayMode);
                 if (!isValid) {
-                    console.log(`[RELAY DEBUG - sendMessageToTabs] Tab ${tab.id} (${tab.url?.substring(0, 50)}...) is invalid, skipping`);
+                    // console.log(`[RELAY DEBUG - sendMessageToTabs] Tab ${tab.id} (${tab.url?.substring(0, 50)}...) is invalid, skipping`);
                     continue;
                 }
-                console.log(`[RELAY DEBUG - sendMessageToTabs] Processing valid tab ${tab.id}: ${tab.url?.substring(0, 50)}...`);
-
-                // Handle message store
-                if (msg2Save) {  
-                    handleMessageStore(tab.id, msg2Save, now, relayMode);
-                }
-
-                published[tab.url] = true;
-                
-                // Handle different site types
-                if (tab.url.includes(".stageten.tv") && settings.s10apikey && settings.s10) {
-					// we will handle this on its own.
-					continue;
-                } else if (tab.url.startsWith("https://www.twitch.tv/popout/")) {
-					let restxt = data.response.length > 500 ? data.response.substring(0, 500) : data.response;
-					await attachAndChat(tab.id, restxt, false, true, false, false, overrideTimeout);
-					
-                } else if (tab.url.startsWith("https://boltplus.tv/")) {
-                    await attachAndChat(tab.id, data.response, false, true, true, true, overrideTimeout);
-					
-				} else if (tab.url.startsWith("https://rumble.com/")) {
-                    await attachAndChat(tab.id, data.response, true, true, false, false, overrideTimeout);	
-					
-                } else if (tab.url.startsWith("https://app.chime.aws/meetings/")) {
-                    await attachAndChat(tab.id, data.response, false, true, true, false, overrideTimeout);
-					//  middle, keypress, backspace, delayedPress, overrideTimeout
-               //     await attachAndChat(tab.id, data.response, true, true, true, true, overrideTimeout); 
-			   
-				} else if (tab.url.startsWith("https://kick.com/")) {
-					let restxt = data.response.length > 500 ? data.response.substring(0, 500) : data.response;
-					if (isSSAPP){
-						await attachAndChat(tab.id, " "+restxt, false, true, true, false, overrideTimeout);
-					} else {
-						await attachAndChat(tab.id, restxt, false, true, true, false, overrideTimeout);
-					}
-                } else if (tab.url.startsWith("https://app.slack.com")) {
-                    await attachAndChat(tab.id, data.response, true, true, true, false, overrideTimeout); 
-                } else if (tab.url.startsWith("https://app.zoom.us/")) {
-                    await attachAndChat(tab.id, data.response, false, true, false, false, overrideTimeout, zoomFakeChat);
-                    continue;
-                } else {
-                    // Generic handler
-                    if (tab.url.includes("youtube.com/live_chat")) {
-                        getYoutubeAvatarImage(tab.url, true);
-						let restxt = data.response;
-						
-						if (restxt.length > 200){
-							restxt = restxt.substring(0, 200);
-							var ignore = checkExactDuplicateAlreadyRelayed(restxt, false, false, true); 
-							if (ignore) {  
-								handleMessageStore(tab.id, ignore, now, relayMode);
-							}
-						}
-						
-						await attachAndChat(tab.id, restxt, true, true, false, false, overrideTimeout);
-						continue;
-                    }
-                    
-                    if (tab.url.includes("tiktok.com")) {
-						let tiktokMessage = data.response;
-						
-						if (settings.notiktoklinks){
-							tiktokMessage = replaceURLsWithSubstring(tiktokMessage, "");
-						}
-						let restxt = tiktokMessage.length > 150 ? tiktokMessage.substring(0, 150) : tiktokMessage;
-						
-						if (restxt!==data.response){
-							var ignore = checkExactDuplicateAlreadyRelayed(restxt, false, false, true); 
-							if (ignore) {  
-								handleMessageStore(tab.id, ignore, now, relayMode);
-							}
-						}
-						
-						await attachAndChat(tab.id, restxt, true, true, false, false, overrideTimeout);
-						continue;
-                    }
-					
-                    await attachAndChat(tab.id, data.response, true, true, false, false, overrideTimeout);
-                }
+                await processTab(tab);
             } catch (e) {
                 chrome.runtime.lastError;
-                //console.loge, tab);
+                // console.log(`[RELAY DEBUG - sendMessageToTabs] Error processing tab ${tab.id}:`, e);
+            }
+        }
+        
+        // If we have a destination filter and didn't process any tabs, try URL matching as fallback
+        if (data.destination && !processedAnyTab) {
+            // console.log(`[RELAY DEBUG - sendMessageToTabs] No tabs matched destination '${data.destination}' by source type, trying URL matching fallback`);
+            
+            // Reset published to allow retrying
+            published = {};
+            
+            // Create a modified data object that bypasses source type checking
+            const fallbackData = {...data};
+            
+            for (const tab of tabs) {
+                try {
+                    // Skip basic invalid checks
+                    if (!tab.url) continue;
+                    if (tab.url.startsWith("chrome://")) continue;
+                    if (tab.url.startsWith("chrome-extension")) continue;
+                    if (tab.url.startsWith("https://socialstream.ninja/")) continue;
+                    if (tab.url in published) continue;
+                    if (!checkIfAllowed(tab.url)) continue;
+                    
+                    // Check TID conditions
+                    if ("tid" in data && data.tid !== false && data.tid !== null) {
+                        if (typeof data.tid == "object") {
+                            if (reverse && data.tid.includes(tab.id.toString())) continue;
+                            if (!reverse && !data.tid.includes(tab.id.toString())) continue;
+                        } else {
+                            if (reverse) {
+                                if (data.tid === tab.id) continue;
+                                if (data.url && tab.url && data.url === tab.url) continue;
+                            } else if (data.tid !== tab.id) continue;
+                        }
+                    }
+                    
+                    // Try URL matching for the destination
+                    if (!tab.url.includes(data.destination)) {
+                        // console.log(`[RELAY DEBUG - sendMessageToTabs FALLBACK] Tab ${tab.id} URL doesn't include '${data.destination}', skipping`);
+                        continue;
+                    }
+                    
+                    // console.log(`[RELAY DEBUG - sendMessageToTabs FALLBACK] Processing tab ${tab.id} via URL match: ${tab.url?.substring(0, 50)}...`);
+                    await processTab(tab);
+                } catch (e) {
+                    chrome.runtime.lastError;
+                    // console.log(`[RELAY DEBUG - sendMessageToTabs FALLBACK] Error processing tab ${tab.id}:`, e);
+                }
             }
         }
     } catch (error) {
-        //console.log'Error in sendMessageToTabs:', error);
+        //console.log('Error in sendMessageToTabs:', error);
         return false;
     }
     
@@ -7446,26 +8562,58 @@ async function isValidTab(tab, data, reverse, published, now, overrideTimeout, r
         }
     }
     
-    // Check destination and timeout conditions
-    if (data.destination && !tab.url.includes(data.destination)) return false;
+    // Check destination - match against tab's source type instead of URL
+    if (data.destination) {
+        // Ensure tab.id exists before trying to get source type
+        if (!tab.id) {
+            // console.log('[RELAY DEBUG - isValidTab] No tab.id available, cannot check source type');
+            // Fall back to URL matching if we have a URL
+            if (tab.url && !tab.url.includes(data.destination)) {
+                return false;
+            }
+            return true; // If no tab.id and no URL, allow it through
+        }
+        
+        const sourceType = await getSourceType(tab.id);
+        // console.log('[RELAY DEBUG - isValidTab] Tab source type:', sourceType, 'Expected destination:', data.destination);
+        
+        // If we couldn't get the source type, fall back to URL matching for custom destinations
+        if (!sourceType) {
+            // For custom destinations like channel names, still use URL matching
+            if (!tab.url.includes(data.destination)) {
+                // console.log('[RELAY DEBUG - isValidTab] No source type, URL check failed');
+                return false;
+            }
+        } else {
+            // For platform destinations, match exact source type (already lowercase from getSourceType)
+            if (sourceType !== data.destination.toLowerCase()) {
+                // console.log('[RELAY DEBUG - isValidTab] Source type mismatch');
+                // Don't return false here - we'll check this in sendMessageToTabs for fallback
+                return false;
+            }
+        }
+    }
     if (reverse && !overrideTimeout && tab.id) {
         if (tab.id in messageTimeout && now - messageTimeout[tab.id] < overrideTimeout) {
             return false;
         }
     }
 	
+	// In relay mode, if relaytargets is configured, only relay to those targets
+	// If relaytargets is not configured (false), allow all targets
 	if (relayMode && relaytargets){
 		let sourceType = await getSourceType(tab.id);
 		if (!sourceType || !relaytargets.includes(sourceType)){
 			return false;
 		}
 	}
+	// If relayMode is true but relaytargets is false, we allow all destinations
 	
     return true;
 }
 
 // Helper function to handle message store
-function handleMessageStore(tabId, msg2Save, now, relayMode) {
+function handleMessageStore(tabId, msg2Save, now, relayMode, origin = 'relay') {
     try {
         if (!messageStore[tabId]) {
             messageStore[tabId] = [];
@@ -7477,11 +8625,58 @@ function handleMessageStore(tabId, msg2Save, now, relayMode) {
         messageStore[tabId].push({
             message: msg2Save,
             timestamp: now,
-            relayMode: relayMode
+            relayMode: relayMode,
+            origin: origin
         });
     } catch(e) {
         errorlog(e);
     }
+}
+function sanitizeMessageForTracking(msg, sanitized = true) {
+    try {
+        if (!msg) {
+            return '';
+        }
+        let normalized;
+        if (!sanitized) {
+            const textArea = document.createElement('textarea');
+            textArea.innerHTML = msg;
+            normalized = textArea.value;
+        } else {
+            normalized = msg.replace(/<\/?[^>]+(>|$)/g, '');
+        }
+        return normalized.replace(/\s\s+/g, ' ').trim();
+    } catch (e) {
+        errorlog(e);
+        return '';
+    }
+}
+function getStoredMessageOrigin(tabId, normalizedMessage) {
+    try {
+        if (!tabId || !normalizedMessage) {
+            return null;
+        }
+
+        const entries = messageStore[tabId];
+        if (!entries || !entries.length) {
+            return null;
+        }
+
+        const now = Date.now();
+        while (entries.length > 0 && now - entries[0].timestamp > 10000) {
+            entries.shift();
+        }
+
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const entry = entries[i];
+            if (entry.message === normalizedMessage) {
+                return entry.origin || null;
+            }
+        }
+    } catch (e) {
+        errorlog(e);
+    }
+    return null;
 }
 function messageExistsInTimeWindow(tabId, messageToFind, timeWindowMs = 1000) {
     try {
@@ -7689,6 +8884,8 @@ async function generalFakeChat(tabId, message, middle = true, keypress = true, b
 
     if (backspace) {
       await sendKeyEvent(tabId, "rawKeyDown", KEY_EVENTS.BACKSPACE);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await sendKeyEvent(tabId, "keyUp", KEY_EVENTS.BACKSPACE);
     }
 
     await insertText(tabId, message);
@@ -7715,10 +8912,6 @@ async function generalFakeChat(tabId, message, middle = true, keypress = true, b
         await sendKeyEvent(tabId, "keyUp", KEY_EVENTS.ENTER);
     }
 	
-	if (backspace) {
-      await sendKeyEvent(tabId, "rawKeyDown", KEY_EVENTS.BACKSPACE);
-    }
-
     await delayedDetach(tabId);
 
   } catch (e) {
@@ -7828,11 +9021,56 @@ class HostMessageFilter {
 
   sanitizeMessage(message) {
     if (!message || typeof message !== 'string') return '';
-    
-    // Strip HTML tags and normalize whitespace
-    return message.replace(/<\/?[^>]+(>|$)/g, "")
-      .replace(/\s\s+/g, " ")
+
+    let text = message;
+
+    try {
+      text = text.replace(/<br\s*\/?>/gi, ' ');
+      text = text.replace(/<img\b[^>]*>/gi, ' ');
+      text = text.replace(/<[^>]+>/g, ' ');
+      text = this.decodeHtmlEntities(text);
+    } catch (err) {
+      console.warn('HostMessageFilter sanitize error', err);
+      text = message;
+    }
+
+    const emojiPattern = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji_Component}\u200D\uFE0F]/gu;
+
+    return text
+      .replace(emojiPattern, '')
+      .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  decodeHtmlEntities(input) {
+    if (!input) return '';
+    if (typeof input !== 'string') input = String(input);
+
+    const namedEntities = {
+      amp: '&',
+      lt: '<',
+      gt: '>',
+      quot: '"',
+      apos: "'",
+      nbsp: ' '
+    };
+
+    return input
+      .replace(/&#x([0-9a-f]+);/gi, (match, hex) => {
+        try {
+          return String.fromCodePoint(parseInt(hex, 16));
+        } catch (e) {
+          return match;
+        }
+      })
+      .replace(/&#(\d+);/g, (match, dec) => {
+        try {
+          return String.fromCodePoint(parseInt(dec, 10));
+        } catch (e) {
+          return match;
+        }
+      })
+      .replace(/&(amp|lt|gt|quot|apos);/gi, (match, name) => namedEntities[name.toLowerCase()] || match);
   }
 
   isHostDuplicate(message) {
@@ -7843,7 +9081,7 @@ class HostMessageFilter {
     // Determine message content based on available fields
     let messageContent = '';
     if (message.textonly) {
-      messageContent = message.textonly;
+      messageContent = message.chatmessage;
     } else if (message.chatmessage !== undefined) {
       messageContent = this.sanitizeMessage(message.chatmessage);
     } else if (message.hasDonation || (message.membership && message.event)) {
@@ -8063,8 +9301,13 @@ async function applyBotActions(data, tab = false) {
 			return false;
 		}
 		
-		if (data.host && data.reflection && settings.nohostreflections){
-			return false;
+		if ((data.hostReflection || (data.host && data.reflection)) && settings.nohostreflections){
+			if (settings.chatbotRespondToReflections && settings.allowChatBot){
+				data.suppressRelay = true;
+				console.log(`[ChatBot] Responding to host reflection from ${data.chatname || 'unknown'} on ${data.type || 'unknown'}.`);
+			} else {
+				return false;
+			}
 		}
 		
 		if (settings.hostFirstSimilarOnly && data.host && hostMessageFilter.isHostDuplicate(data)) {
@@ -8176,23 +9419,14 @@ async function applyBotActions(data, tab = false) {
 		}
 		
 		if (settings.firsttimers && data.chatname && data.type){
-			console.log("Checking first timer:", data.chatname, data.type, data.userid);
 			try {
 				let exists = await messageStoreDB.checkUserTypeExists((data.userid || data.chatname), data.type);
-				console.log("User exists:", exists);
 				if (!exists){
 					data.firsttime = true;
-					console.log("First timer marked:", data.chatname);
 				}
 			} catch (e) {
 				console.error("Error checking first timer:", e);
 			}
-		} else {
-			console.log("First timer check skipped:", {
-				setting: settings.firsttimers,
-				chatname: data.chatname,
-				type: data.type
-			});
 		}
 		
 		if (settings.joke && data.chatmessage && data.chatmessage.toLowerCase() === "!joke") {
@@ -8313,6 +9547,31 @@ async function applyBotActions(data, tab = false) {
 			}
 		}
 		
+		// Handle Spotify commands
+		if (spotify && settings.spotifyEnabled && data.chatmessage) {
+			const response = spotify.handleCommand(data.chatmessage);
+			if (response) {
+				const botResponse = {
+					chatname: settings.spotifyBotName?.textsetting || "Spotify Bot",
+					chatbadges: "",
+					backgroundColor: "",
+					textColor: "",
+					chatmessage: response,
+					chatimg: "https://socialstream.ninja/icons/bot.png",
+					hasDonation: "",
+					membership: "",
+					isRelay: false,
+					type: "spotify",
+					bot: "spotify",
+					timestamp: Date.now()
+				};
+				
+				sendToS10(botResponse);
+				sendToPost(botResponse);
+				return null; // Don't process the original command further
+			}
+		}
+		
 		if (settings.dice && data.chatname && data.chatmessage && (data.chatmessage.toLowerCase().startsWith("!dice ") || data.chatmessage.toLowerCase() === "!dice")) {
 			//	//console.log"dice detected");
 			//if (Date.now() - messageTimeout > 5100) {
@@ -8358,8 +9617,33 @@ async function applyBotActions(data, tab = false) {
 			//}
 		}
 		
+		// Handle Spotify commands
+		if (spotify && settings.spotifyEnabled && data.chatmessage && data.chatname && !data.bot) {
+			const spotifyResponse = spotify.handleCommand(data.chatmessage);
+			if (spotifyResponse) {
+				setTimeout(() => {
+					const botMessage = {
+						chatname: settings.spotifyBotName?.textsetting || "Spotify Bot",
+						chatbadges: "",
+						backgroundColor: "",
+						textColor: "",
+						chatmessage: spotifyResponse,
+						chatimg: "https://socialstream.ninja/icons/bot.png",
+						hasDonation: "",
+						membership: "",
+						isRelay: false,
+						type: "spotify",
+						bot: "spotify",
+						timestamp: Date.now()
+					};
+					sendToDestinations(botMessage);
+				}, 50);
+			}
+		}
 		
-		if (settings.relayall && data.chatmessage && !data.event && tab && data.chatmessage.includes(miscTranslations.said)){
+		
+		const messageToCheck = data.textContent || data.chatmessage;
+		if (settings.relayall && data.chatmessage && !data.event && tab && messageToCheck.includes(miscTranslations.said)){
 			//console.log("1");
 			return null;
 			
@@ -8447,9 +9731,10 @@ async function applyBotActions(data, tab = false) {
 				if (!event?.setting || !command || !response) continue;
 				
 				const isFullMatch = settings.botReplyMessageFull;
+				const messageText = data.textContent || data.chatmessage;
 				const messageMatches = isFullMatch ? 
-				  data.chatmessage === command :
-				  data.chatmessage.includes(command);
+				  messageText === command :
+				  messageText.includes(command);
 				  
 				if (!messageMatches) continue;
 				
@@ -8519,23 +9804,50 @@ async function applyBotActions(data, tab = false) {
 		
 		if (settings.highlightevent && settings.highlightevent.textsetting.trim() && data.chatmessage && data.event) {
 			const eventTexts = settings.highlightevent.textsetting.split(',').map(text => text.trim());
-			if (eventTexts.some(text => data.chatmessage.includes(text))) {
+			const messageText = data.textContent || data.chatmessage;
+			if (eventTexts.some(text => messageText.includes(text))) {
 				data.highlightColor = "#fff387";
 			}
 		}
 
-		if (settings.highlightword && settings.highlightword.textsetting.trim() && data.chatmessage) {
-			const wordTexts = settings.highlightword.textsetting.split(',').map(text => text.trim());
-			if (wordTexts.some(text => data.chatmessage.includes(text))) {
-				data.highlightColor = "#fff387";
+			if (settings.highlightword && settings.highlightword.textsetting.trim() && data.chatmessage) {
+				const wordTexts = settings.highlightword.textsetting.split(',').map(text => text.trim());
+				const messageText = data.textContent || data.chatmessage;
+				if (wordTexts.some(text => messageText.includes(text))) {
+					data.highlightColor = "#fff387";
+				}
 			}
-		}
 
-		if (settings.relaydonos && data.hasDonation && data.chatname && data.type) {
+			if (settings.highlightHostMentions && settings.hostnamesext?.textsetting && data.chatmessage) {
+				const rawHosts = settings.hostnamesext.textsetting.split(',');
+				const messageText = (data.textContent || data.chatmessage || '').toLowerCase();
+
+				const hasMention = rawHosts.some(entry => {
+					const trimmed = entry.trim();
+					if (!trimmed) {
+						return false;
+					}
+
+					const [name] = trimmed.toLowerCase().split(':');
+					if (!name) {
+						return false;
+					}
+
+					const handle = name.startsWith('@') ? name : `@${name}`;
+					return messageText.includes(handle);
+				});
+
+				if (hasMention) {
+					data.highlightColor = data.highlightColor || "#fff387";
+				}
+			}
+
+			if (settings.relaydonos && data.hasDonation && data.chatname && data.type) {
 			//if (Date.now() - messageTimeout > 100) {
 				// respond to "1" with a "1" automatically; at most 1 time per 100ms.
 
-				if (data.chatmessage.includes(". Thank you") && data.chatmessage.includes(" donated ")) {
+				const messageText = data.textContent || data.chatmessage;
+				if (messageText.includes(". Thank you") && messageText.includes(" donated ")) {
 					return null;
 				} // probably a reply
 
@@ -8582,7 +9894,8 @@ async function applyBotActions(data, tab = false) {
 				}
 			}
 		} else if (settings.giphyKey && settings.giphyKey.textsetting && settings.giphy2 && data.chatmessage && data.chatmessage.indexOf("#") != -1 && !data.contentimg) {
-			var xx = data.chatmessage.split(" ");
+			const messageText = data.textContent || data.chatmessage;
+			var xx = messageText.split(" ");
 			for (var i = 0; i < xx.length; i++) {
 				var word = xx[i];
 				if (!word.startsWith("#")) {
@@ -8596,9 +9909,9 @@ async function applyBotActions(data, tab = false) {
 					}
 
 					if (settings.hidegiphytrigger) {
-						if (data.chatmessage.includes("#" + word + " " + order)) {
+						if (messageText.includes("#" + word + " " + order)) {
 							data.chatmessage = data.chatmessage.replace("#" + word + " " + order, "");
-						} else if (data.chatmessage.includes("#" + word + " ")) {
+						} else if (messageText.includes("#" + word + " ")) {
 							data.chatmessage = data.chatmessage.replace("#" + word + " ", "");
 						} else {
 							data.chatmessage = data.chatmessage.replace("#" + word, "");
@@ -8821,24 +10134,24 @@ async function applyBotActions(data, tab = false) {
 	}
 
 	if (settings.comment_background) {
-		if (!data.backgroundColor) {
+		//if (!data.backgroundColor) {
 			data.backgroundColor = settings.comment_background.textsetting;
-		}
+		//}
 	}
 	if (settings.comment_color) {
-		if (!data.textColor) {
+		//if (!data.textColor) {
 			data.textColor = settings.comment_color.textsetting;
-		}
+		//}
 	}
 	if (settings.name_background) {
-		if (!data.backgroundNameColor) {
+		//if (!data.backgroundNameColor) {
 			data.backgroundNameColor = "background-color:" + settings.name_background.textsetting + ";";
-		}
+		//}
 	}
 	if (settings.name_color) {
-		if (!data.textNameColor) {
+		//if (!data.textNameColor) {
 			data.textNameColor = "color:" + settings.name_color.textsetting + ";";
-		}
+		//}
 	}
 
 	if (settings.defaultavatar) {
@@ -8953,9 +10266,15 @@ async function applyBotActions(data, tab = false) {
 				if (settings.modLLMonly){
 					if (data.mod){
 						processMessageWithOllama(data);
+						// SECONDARY FIX: Add await to properly handle async errors
+						// Uncomment to test if error handling needs this
+						// await processMessageWithOllama(data);
 					}
 				} else {
 					processMessageWithOllama(data);
+					// SECONDARY FIX: Add await to properly handle async errors
+					// Uncomment to test if error handling needs this
+					// await processMessageWithOllama(data);
 				}
 			} catch(e){
 				console.log(e); // ai.js file missing?
@@ -9200,52 +10519,69 @@ window.onload = async function () {
 		loadSettings(programmedSettings, true);
     } else {
         log("Loading settings from the main file into the background.js");
-        chrome.storage.sync.get(properties, function (item) {
-            if (isSSAPP && item) {
-                loadSettings(item, false); 
+        // Load sync items (streamID, password, state) and local items (settings) separately
+        chrome.storage.sync.get(["streamID", "password", "state"], function (syncItem) {
+            chrome.storage.local.get(["settings"], function (localItem) {
+                // Combine sync and local items
+                let item = Object.assign({}, syncItem, localItem);
                 
-                // Initialize file handles after settings are loaded
-                initializeFileHandles();
-                return;
-            }
-            
-            if (item?.settings) {
-                alert("upgrading from old storage structure format to new...");
-                chrome.storage.sync.remove(["settings"], function (Items) {
-                    log("upgrading from sync to local storage");
-                });
-                chrome.storage.local.get(["settings"], function (item2) {
-                    if (item2?.settings){
-                        item = [...item, ...item2];
-                    }
-                    if (item?.settings){
-                        chrome.storage.local.set({
-                            settings: item.settings
-                        });
-                    }
-                    if (item){
-                        loadSettings(item, false);
-                        
-                        // Initialize file handles after settings are loaded
-                        if (isSSAPP) {
-                            initializeFileHandles();
-                        }
-                    }
-                });
+                if (isSSAPP && item) {
+                    loadSettings(item, false); 
+                    
+                    // Initialize file handles after settings are loaded
+                    initializeFileHandles();
+                    return;
+                }
                 
-            } else {
-                loadSettings(item, false);
-                chrome.storage.local.get(["settings"], function (item2) {
-                    if (item2){
-                        loadSettings(item2, false);
-                        
-                        // Initialize file handles after settings are loaded
-                        if (isSSAPP) {
-                            initializeFileHandles();
+                // Check for old migration scenario
+                if (!item.settings) {
+                    // Try to get all properties from local storage (old format)
+                    chrome.storage.local.get(properties, function (oldItem) {
+                        if (oldItem?.settings) {
+                            alert("upgrading from old storage structure format to new...");
+                            // Move sync items to sync storage
+                            if (oldItem.streamID || oldItem.password || oldItem.state) {
+                                chrome.storage.sync.set({
+                                    streamID: oldItem.streamID || undefined,
+                                    password: oldItem.password || undefined,
+                                    state: oldItem.state || undefined
+                                });
+                            }
+                            // Keep settings in local storage
+                            chrome.storage.local.set({
+                                settings: oldItem.settings
+                            });
+                            // Remove old sync storage settings if any
+                            chrome.storage.sync.remove(["settings"], function () {
+                                log("upgrading from sync to local storage");
+                            });
+                            
+                            loadSettings(oldItem, false);
+                            
+                            // Initialize file handles after settings are loaded
+                            if (isSSAPP) {
+                                initializeFileHandles();
+                            }
+                        } else {
+                            // No migration needed, just load what we have
+                            loadSettings(item, false);
+                            
+                            // Initialize file handles after settings are loaded
+                            if (isSSAPP) {
+                                initializeFileHandles();
+                            }
                         }
+                    });
+                } else {
+                    // Normal loading - we have settings
+                    loadSettings(item, false);
+                    
+                    // Initialize file handles after settings are loaded
+                    if (isSSAPP) {
+                        initializeFileHandles();
                     }
-                });
-            }
+                }
+            });
         });
     }
 };
@@ -9502,22 +10838,32 @@ function isEqualMessage(message1, message2) {
 window.sendMessageToTabs = sendMessageToTabs;
 window.sendToDestinations = sendToDestinations;
 window.fetchWithTimeout = fetchWithTimeout;
+window.sanitizeRelay = sanitizeRelay;
+window.checkExactDuplicateAlreadyRelayed = checkExactDuplicateAlreadyRelayed;
+window.handleMessageStore = handleMessageStore;
+// Expose P2P targeting helper so EventFlowSystem can reach specific overlay pages (e.g., actions)
+window.sendTargetP2P = sendTargetP2P;
 
-console.log('[EventFlow Init] Checking sendMessageToTabs function:', typeof window.sendMessageToTabs, window.sendMessageToTabs ? window.sendMessageToTabs.toString().substring(0, 100) : 'null');
 
 let tmp = new EventFlowSystem({
 	sendMessageToTabs: window.sendMessageToTabs || null,
 	sendToDestinations: window.sendToDestinations || null,
 	pointsSystem: window.pointsSystem || null,
-	fetchWithTimeout: window.fetchWithTimeout // Assuming fetchWithTimeout is on window from background.js
+	fetchWithTimeout: window.fetchWithTimeout || null, // Assuming fetchWithTimeout is on window from background.js
+	sanitizeRelay: window.sanitizeRelay || null,
+	checkExactDuplicateAlreadyRelayed: window.checkExactDuplicateAlreadyRelayed || null,
+	messageStore: messageStore || {},  // Share the message store for duplicate detection
+	handleMessageStore: handleMessageStore || null,  // Share the message store handler
+	sendTargetP2P: window.sendTargetP2P || null  // Add sendTargetP2P for OBS and other actions
 });
 
+
 tmp.initPromise.then(() => {
-	window.eventFlowSystem = tmp;
-	console.log('[EventFlow Init] EventFlowSystem initialized successfully');
-	console.log('[EventFlow Init] sendMessageToTabs in system:', typeof tmp.sendMessageToTabs, tmp.sendMessageToTabs ? 'Function present' : 'Function missing');
+    window.eventFlowSystem = tmp;
+    // Start periodic scheduler so time-based triggers (timeInterval/timeOfDay) work without incoming messages
+    try { tmp.startScheduler && tmp.startScheduler(); } catch (e) { console.warn('Failed to start Event Flow scheduler', e); }
 }).catch(error => {
-	console.error('Failed to initialize Event Flow System for Social Stream Ninja:', error);
+    console.error('Failed to initialize Event Flow System for Social Stream Ninja:', error);
 });
 
 window.addEventListener('beforeunload', async function() {

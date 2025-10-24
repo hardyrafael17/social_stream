@@ -1,5 +1,29 @@
 // popup.js
 
+// Listen for language change messages from parent window
+window.addEventListener('message', function(event) {
+	// Check if this is a language change message
+	if (event.data && event.data.type === 'changeLanguage') {
+		console.log('Received language change message:', event.data.language);
+		
+		// Update the language selector if it exists
+		const languageSelect = document.querySelector('select[data-optionsetting="translationlanguage"]');
+		if (languageSelect && languageSelect.value !== event.data.language) {
+			// Save the new language setting
+			chrome.runtime.sendMessage({
+				cmd: "saveSetting",
+				type: "optionsetting",
+				setting: "translationlanguage",
+				value: event.data.language
+			}, function(response) {
+				console.log("Language setting saved, reloading page");
+				// Reload the page to apply the new language
+				window.location.reload();
+			});
+		}
+	}
+});
+
 (function (w) {
 	w.URLSearchParams = w.URLSearchParams || function (searchString) {
 		var self = this;
@@ -24,10 +48,91 @@ ssapp = urlParams.has("ssapp") || ssapp;
 var isExtensionOn = false;
 var ssapp = false;
 var USERNAMES = [];
+
+// Function to open Event Flow Editor
+function openEventFlowEditor() {
+    // For all contexts, just open actions/index.html
+    window.open('actions/index.html', '_blank');
+}
+// Make function available globally
+window.openEventFlowEditor = openEventFlowEditor;
 var WebMidi = null;
+var webMidiInitialized = false;
+var webMidiScriptLoaded = false;
 
 function log(msg,a,b){
 	console.log(msg,a,b);
+}
+
+// MIDI-related functions
+async function loadWebMidiScript(callback) {
+	const script = document.createElement("script");
+	script.type = "text/javascript";
+	script.src = "./thirdparty/webmidi3.js";
+	script.onload = callback; // Run the callback once the script loads
+	script.onerror = () => {
+		console.error("Failed to load WebMidi script.");
+	};
+	document.body.appendChild(script);
+}
+
+async function initializeMIDIDropdown() {
+	try {
+		await WebMidi.enable();
+		console.log("WebMidi enabled!");
+		webMidiInitialized = true;
+		
+		// Initial population of all MIDI selects
+		updateAllMidiSelects();
+		
+		// Handle device changes
+		WebMidi.addListener("connected", updateAllMidiSelects);
+		WebMidi.addListener("disconnected", updateAllMidiSelects);
+		
+	} catch(e) {
+		console.log("Failed to initialize WebMidi:", e);
+	}
+}
+
+async function disableWebMidi() {
+	if (webMidiInitialized && WebMidi) {
+		try {
+			console.log("Disabling WebMidi...");
+			
+			// Remove listeners
+			WebMidi.removeListener("connected");
+			WebMidi.removeListener("disconnected");
+			
+			// Disable WebMidi to release all MIDI devices
+			await WebMidi.disable();
+			webMidiInitialized = false;
+			
+			// Don't clear the MIDI device selects - preserve user's selections
+			// The dropdowns will be repopulated when MIDI is re-enabled
+			
+			console.log("WebMidi disabled successfully");
+		} catch (e) {
+			console.error("Failed to disable WebMidi:", e);
+		}
+	}
+}
+
+async function handleMidiToggle(enabled) {
+	if (enabled) {
+		if (!webMidiScriptLoaded) {
+			// Load WebMidi script first
+			loadWebMidiScript(async () => {
+				webMidiScriptLoaded = true;
+				await initializeMIDIDropdown();
+			});
+		} else if (!webMidiInitialized) {
+			// Script already loaded, just initialize
+			await initializeMIDIDropdown();
+		}
+	} else {
+		// Disable WebMidi to release devices
+		await disableWebMidi();
+	}
 }
 
 if (typeof(chrome.runtime)=='undefined'){
@@ -38,10 +143,67 @@ if (typeof(chrome.runtime)=='undefined'){
 	chrome.runtime = {}
 	chrome.runtime.id = 1;
 	
+	// Add chrome.storage API for Electron
+	chrome.storage = {
+		local: {
+			get: function(keys, callback) {
+				// Use localStorage as a fallback for Electron
+				if (typeof callback === 'function') {
+					const result = {};
+					const keysArray = Array.isArray(keys) ? keys : [keys];
+					keysArray.forEach(key => {
+						const value = localStorage.getItem('chrome_storage_' + key);
+						if (value !== null) {
+							try {
+								result[key] = JSON.parse(value);
+							} catch (e) {
+								result[key] = value;
+							}
+						}
+					});
+					setTimeout(() => callback(result), 0);
+				}
+			},
+			set: function(items, callback) {
+				// Use localStorage as a fallback for Electron
+				Object.keys(items).forEach(key => {
+					localStorage.setItem('chrome_storage_' + key, JSON.stringify(items[key]));
+				});
+				if (typeof callback === 'function') {
+					setTimeout(() => callback(), 0);
+				}
+			},
+			remove: function(keys, callback) {
+				const keysArray = Array.isArray(keys) ? keys : [keys];
+				keysArray.forEach(key => {
+					localStorage.removeItem('chrome_storage_' + key);
+				});
+				if (typeof callback === 'function') {
+					setTimeout(() => callback(), 0);
+				}
+			}
+		},
+		sync: {
+			get: function(keys, callback) {
+				// Use local storage for sync in Electron
+				chrome.storage.local.get(keys, callback);
+			},
+			set: function(items, callback) {
+				// Use local storage for sync in Electron
+				chrome.storage.local.set(items, callback);
+			},
+			remove: function(keys, callback) {
+				// Use local storage for sync in Electron
+				chrome.storage.local.remove(keys, callback);
+			}
+		}
+	};
+	
 	log("pop up started");
 	
 	if (typeof require !== "undefined"){
-		var { ipcRenderer, contextBridge } = require("electron");
+		var { ipcRenderer, contextBridge, shell } = require("electron");
+		window.shell = shell;
 		
 		ssapp = true;
 		
@@ -76,6 +238,15 @@ if (typeof(chrome.runtime)=='undefined'){
 			var sender = {};
 			sender.tab = {};
 			sender.tab.id = null;
+
+			// Check if this is a callback response
+			if (args[0] && args[0].callbackId && pendingCallbacks.has(args[0].callbackId)) {
+				const { callback, timeoutId } = pendingCallbacks.get(args[0].callbackId);
+				clearTimeout(timeoutId);
+				pendingCallbacks.delete(args[0].callbackId);
+				callback(args[0]);
+				return;
+			}
 
 			if (args[0] && args[0].forPopup) {
 				log("for pop up");
@@ -112,14 +283,71 @@ if (typeof(chrome.runtime)=='undefined'){
 		console.error(e);
 	}
 	
+	// Store callbacks with unique IDs
+	const pendingCallbacks = new Map();
+	let callbackIdCounter = 0;
+	
 	chrome.runtime.sendMessage = async function(data, callback){ // every single response, is either nothing, or update()
-		let response = await ipcRenderer.sendSync('fromPopup',data);
-		if (typeof(callback) == "function"){
+		if (typeof(callback) == "function") {
+			// Generate unique callback ID
+			const callbackId = ++callbackIdCounter;
+			
+			// Create promise with timeout
+			const promise = new Promise((resolve) => {
+				// Store callback with timeout
+				const timeoutId = setTimeout(() => {
+					pendingCallbacks.delete(callbackId);
+					// If timeout, get sync response as fallback
+					const response = ipcRenderer.sendSync('fromPopup', data);
+					resolve(response);
+				}, 500);
+				
+				pendingCallbacks.set(callbackId, { 
+					callback: resolve, 
+					timeoutId 
+				});
+			});
+			
+			// Send message with callback ID
+			ipcRenderer.send('fromPopup', { ...data, callbackId });
+			
+			// Wait for response
+			const response = await promise;
 			callback(response);
+		} else {
+			// No callback, use sync as before
+			let response = await ipcRenderer.sendSync('fromPopup',data);
 		}
 	};
 	chrome.runtime.getManifest = function(){
 		return false; // I'll need to add version info eventually
+	}
+	
+	chrome.runtime.getURL = function(path){
+		// In Electron, construct URL relative to the app's base path
+		// Remove leading slash if present
+		if (path.startsWith('/')) {
+			path = path.substring(1);
+		}
+		// Get the current window location and construct relative URL
+		const baseUrl = window.location.origin + window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1);
+		return baseUrl + path;
+	}
+	
+	// Add chrome.tabs API for Electron
+	chrome.tabs = {
+		create: function(options) {
+			// In Electron, open in default browser or new window
+			if (options && options.url) {
+				if (typeof require !== "undefined" && window.shell) {
+					// Use Electron's shell to open external links
+					window.shell.openExternal(options.url);
+				} else {
+					// Fallback to window.open
+					window.open(options.url, '_blank');
+				}
+			}
+		}
 	}
 	
 	try {
@@ -200,50 +428,28 @@ if (typeof(chrome.runtime)=='undefined'){
 }
 
 function copyToClipboard(event) {
-	//console.log(event);
-   
+	
 	// if (event.target.parentNode.parentNode.querySelector("[data-raw] a[href]")){ // DEPRECATED data-raw
-	if (event.target.parentNode.parentNode.querySelector("a[href]")){
-		const targetElement = event.target.parentNode.parentNode; // div containing the link and button
-		const linkOwnerDiv = document.getElementById(targetElement.id);
-		if (linkOwnerDiv && linkOwnerDiv.raw){
-			navigator.clipboard.writeText(linkOwnerDiv.raw).then(function() {
-				event.target.classList.add("flashing");
-				setTimeout(()=>{
-					event.target.classList.remove("flashing");
-				},500);
-			}, function(err) {
-				console.error('Could not copy text: ', err);
-			});
-		}
-	// } else if (event.target.parentNode.parentNode.parentNode.querySelector("[data-raw] a[href]")){ // DEPRECATED data-raw
-	} else if (event.target.parentNode.parentNode.parentNode.querySelector("a[href]")){
-		const targetElement = event.target.parentNode.parentNode.parentNode;
-		const linkOwnerDiv = document.getElementById(targetElement.id);
-		if (linkOwnerDiv && linkOwnerDiv.raw){
-			navigator.clipboard.writeText(linkOwnerDiv.raw).then(function() {
-				event.target.classList.add("flashing");
-				setTimeout(()=>{
-					event.target.classList.remove("flashing");
-				},500);
-			}, function(err) {
-				console.error('Could not copy text: ', err);
-			});
-		}
-	// } else if (event.target.parentNode.parentNode.parentNode.parentNode.querySelector("[data-raw] a[href]")){ // DEPRECATED data-raw
-	} else if (event.target.parentNode.parentNode.parentNode.parentNode.querySelector("a[href]")){
-		const targetElement = event.target.parentNode.parentNode.parentNode.parentNode;
-		const linkOwnerDiv = document.getElementById(targetElement.id);
-		if (linkOwnerDiv && linkOwnerDiv.raw){
-			navigator.clipboard.writeText(linkOwnerDiv.raw).then(function() {
-				event.target.classList.add("flashing");
-				setTimeout(()=>{
-					event.target.classList.remove("flashing");
-				},500);
-			}, function(err) {
-				console.error('Could not copy text: ', err);
-			});
-		}
+	// Find the closest .link container
+	const linkContainer = event.target.closest('.link');
+	if (!linkContainer) {
+		console.error('Could not find .link container');
+		return;
+	}
+	
+	// Find the div with the .raw property within this container
+	const linkOwnerDiv = linkContainer.querySelector('[data-raw]');
+	if (linkOwnerDiv && linkOwnerDiv.raw) {
+		navigator.clipboard.writeText(linkOwnerDiv.raw).then(function() {
+			event.target.classList.add("flashing");
+			setTimeout(()=>{
+				event.target.classList.remove("flashing");
+			}, 500);
+		}, function(err) {
+			console.error('Could not copy text: ', err);
+		});
+	} else {
+		console.error('Could not find element with raw URL to copy');
 	}
 }
 var translation = {};
@@ -627,7 +833,7 @@ function setupSourceSelection(inputId, isSettingBased = false) {
     if (sourcesList && sourcesList.size > 0) {
         addContainer.innerHTML = `
             <select id="new${inputId}Type">
-                <option value="" selected>All sources</option>
+                <option value="" selected>Select Sources</option>
                 ${Array.from(sourcesList).sort().map(source => 
                     `<option value="${source}">${source.charAt(0).toUpperCase() + source.slice(1)}</option>`
                 ).join('')}
@@ -721,6 +927,21 @@ const eventTemplates = {
       </div>
     </div>
   `,
+
+  webhookRelay: (id) => {
+    const suffix = id === 1 ? '' : id;
+    const inputId = `webhookrelayurl${suffix}`;
+    const settingKey = id === 1 ? 'webhookrelayurl' : `webhookrelayurl${id}`;
+
+    return `
+    <div class="event-container">
+      <div class="textInputContainer" style="width: 235px">
+        <input type="text" id="${inputId}" class="textInput" autocomplete="off" placeholder="https://thirdparty.com/api" data-textsetting="${settingKey}">
+        <label for="${inputId}">&gt; Webhook URL</label>
+      </div>
+    </div>
+  `;
+  },
   
   timedMessage: (id) => `
     <div class="event-container">
@@ -793,6 +1014,10 @@ function initializeInputHandlers(container) {
 	  prefixes: ['chatevent', 'chatcommand', 'chatwebhook', 'chatcommandtimeout'],
 	  type: 'chatCommand'
 	},
+	webhookRelay: {
+	  prefixes: ['webhookrelayurl'],
+	  type: 'webhookRelay'
+	},
 	timedMessage: {
 	  prefixes: ['timemessageevent', 'timemessagecommand', 'timemessageinterval', 'timemessageoffset'],
 	  type: 'timedMessage'
@@ -813,12 +1038,20 @@ function findExistingEvents(eventType, response) {
   Object.keys(settings).forEach(key => {
 	pattern.prefixes.forEach(prefix => {
 	  if (key.startsWith(prefix)) {
-		const id = key.replace(prefix, '');
+		const suffix = key.slice(prefix.length);
+		let eventId = 1;
+		if (suffix) {
+		  const parsed = parseInt(suffix, 10);
+		  if (Number.isNaN(parsed)) {
+			return;
+		  }
+		  eventId = parsed;
+		}
 		if (settings[key]?.setting !== undefined || 
 			settings[key]?.textsetting !== undefined || 
 			settings[key]?.optionsetting !== undefined || 
 			settings[key]?.numbersetting !== undefined) {
-		  events.add(parseInt(id));
+		  events.add(eventId);
 		}
 	  }
 	});
@@ -827,7 +1060,7 @@ function findExistingEvents(eventType, response) {
   return Array.from(events).sort((a, b) => a - b);
 }
 function updateAllMidiSelects() {
-  document.querySelectorAll("select[data-optionsetting^='mididevice']").forEach(select => {
+  document.querySelectorAll("select[data-optionsetting^='mididevice'], select[data-optionsetting='midiOutputDevice']").forEach(select => {
     const currentValue = select.value;
     
     // Repopulate the select
@@ -1165,7 +1398,7 @@ function createTabsFromSettings(response) {
   if (!response || !response.settings) return;
 
   // Clear existing tabs first
-  const containers = ['botReplyMessages', 'chatCommands', 'timedMessages', 'midiCommands'];
+  const containers = ['webhookRelayUrls', 'botReplyMessages', 'chatCommands', 'timedMessages', 'midiCommands'];
   containers.forEach(containerId => {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -1174,6 +1407,7 @@ function createTabsFromSettings(response) {
 
   // Track existing events for each type
   const existingEvents = {
+    webhookRelay: new Set(),
     botReply: new Set(),
     chatCommand: new Set(),
     timedMessage: new Set(),
@@ -1214,7 +1448,26 @@ function createTabsFromSettings(response) {
         existingEvents.midiCommand.add(parseInt(id));
       }
     }
+    // Webhook relay destinations
+    else if (key.startsWith('webhookrelayurl')) {
+      const entry = response.settings[key];
+      const value = typeof entry === 'string' ? entry : entry?.textsetting;
+      if (typeof value === 'string' && value.trim()) {
+        const suffix = key.replace('webhookrelayurl', '');
+        let id = 1;
+        if (suffix && /^\d+$/.test(suffix)) {
+          id = parseInt(suffix, 10);
+        }
+        existingEvents.webhookRelay.add(id);
+      }
+    }
   });
+
+  if (existingEvents.webhookRelay.size > 0) {
+    initializeTabSystem('webhookRelayUrls', 'webhookRelay', Array.from(existingEvents.webhookRelay), response);
+  } else {
+    initializeTabSystem('webhookRelayUrls', 'webhookRelay', [1], response);
+  }
 
   // Initialize tab systems with found events
   if (existingEvents.botReply.size > 0) {
@@ -1306,11 +1559,29 @@ function setupPageLinks(hideLinks, baseURL, streamID, password) {
     { id: "privatechatbot", path: "chatbot.html", style: "color:lightblue;" },
     { id: "eventsdashboard", path: "events.html" },
 	{ id: "flowactions", path: "actions.html" },
-	{ id: "custom-gif-commands", path: "gif.html" }
+	{ id: "custom-gif-commands", path: "gif.html" },
+	{ id: "scoreboard", path: "scoreboard.html"}
+	
   ];
   
   // Process all standard pages
   pages.forEach(page => {
+    // Skip dock update if a preset is selected
+    if (page.id === "dock") {
+      const overlaySelector = document.getElementById('overlay-preset-select');
+      if (overlaySelector && overlaySelector.value) {
+        return; // Skip updating dock when preset is active
+      }
+    }
+    
+    // Skip featured overlay update if a preset is selected
+    if (page.id === "overlay") {
+      const featuredPresetSelector = document.getElementById('featured-preset-select');
+      if (featuredPresetSelector && featuredPresetSelector.value) {
+        return; // Skip updating featured overlay when preset is active
+      }
+    }
+    
     const linkPath = page.linkPath || page.path;
     const fullURL = `${baseURL}${page.path}?session=${streamID}${password}${customParams}${versionParam}`;
     const element = document.getElementById(page.id);
@@ -1336,6 +1607,86 @@ function setupPageLinks(hideLinks, baseURL, streamID, password) {
   }
 }
 
+function applyFeaturedOverlayPreset(presetValue) {
+	const overlayDiv = document.getElementById('overlay');
+	const overlayLink = document.getElementById('overlaylink');
+	const presetSelector = document.getElementById('featured-preset-select');
+
+	if (!overlayDiv || !overlayLink) {
+		return;
+	}
+
+	if (typeof presetValue === 'string' && presetSelector && presetSelector.value !== presetValue) {
+		presetSelector.value = presetValue;
+	}
+
+	document.querySelectorAll('.preset-config-section').forEach(section => {
+		section.style.display = 'none';
+	});
+
+	const toggleClassicOptions = (show) => {
+		document.querySelectorAll('.wrapper:has(.options_group.single_message)').forEach(wrapper => {
+			wrapper.style.display = show ? '' : 'none';
+		});
+	};
+
+	if (presetValue) {
+		const presetUrl = baseURL + presetValue;
+		let currentParams = overlayDiv.raw?.split('?')[1] || '';
+		let session = '';
+
+		if (currentParams) {
+			const params = new URLSearchParams(currentParams);
+			session = params.get('session') || params.get('room') || '';
+		}
+
+		if (!session) {
+			const sessionInput = document.getElementById('sessionid');
+			if (sessionInput && sessionInput.value) {
+				session = sessionInput.value;
+			}
+		}
+
+		let newUrl = presetUrl;
+		if (session) {
+			newUrl += (presetUrl.includes('?') ? '&' : '?') + 'session=' + session;
+		}
+
+		overlayDiv.raw = newUrl;
+		overlayLink.href = newUrl;
+		overlayLink.innerText = document.body.classList.contains('hidelinks') ? 'Click to open link' : newUrl;
+
+		toggleClassicOptions(false);
+
+		const presetType = presetValue.match(/featured-(\w+)\.html/)?.[1];
+		if (presetType) {
+			const presetConfigSection = document.getElementById(`preset-config-${presetType}`);
+			if (presetConfigSection) {
+				presetConfigSection.style.display = 'block';
+			}
+		}
+	} else {
+		let currentParams = overlayDiv.raw?.split('?')[1] || '';
+
+		if (!currentParams) {
+			const sessionInput = document.getElementById('sessionid');
+			if (sessionInput && sessionInput.value) {
+				currentParams = 'session=' + sessionInput.value;
+			}
+		}
+
+		const classicUrl = baseURL + 'featured.html' + (currentParams ? '?' + currentParams : '');
+
+		overlayDiv.raw = classicUrl;
+		overlayLink.href = classicUrl;
+		overlayLink.innerText = document.body.classList.contains('hidelinks') ? 'Click to open link' : classicUrl;
+
+		toggleClassicOptions(true);
+	}
+
+	refreshLinks();
+}
+
 function removeTTSProviderParams(url, selectedProvider=null) {
   if (!url) return url;
   
@@ -1345,7 +1696,9 @@ function removeTTSProviderParams(url, selectedProvider=null) {
     elevenlabs: ['elevenlabskey', 'elevenlabsmodel', 'elevenlabsvoice', 'elevenlatency','elevenstability','elevensimilarity','elevenstyle','elevenspeakerboost','elevenrate','voice11'],
     google: ['googleapikey', 'googlevoice','googleaudioprofile','googlerate','googlelang'],
     speechify: ['speechifykey', 'speechifyvoice','voicespeechify' ,'speechifymodel','speechifylang','speechifyspeed'],
-    kokoro: ['kokorokey', 'voicekokoro', 'kokorospeed']
+    kokoro: ['kokorokey', 'voicekokoro', 'kokorospeed'],
+    kitten: ['kittenvoice', 'kittenspeed', 'kittensamplerate'],
+    openai: ['openaikey', 'openaiendpoint', 'voiceopenai', 'openaimodel', 'openaispeed', 'openaiformat', 'openaicustomvoice', 'openaicustommodelx']
   };
   
   if (selectedProvider === null) {
@@ -1386,11 +1739,27 @@ function setupTtsProviders(response) {
         else if (response.settings?.googleAPIKey?.textparam1) ttsService = "google";
         else if (response.settings?.elevenlabskey?.textparam1) ttsService = "elevenlabs";
         else if (response.settings?.speechifykey?.textparam1) ttsService = "speechify";
+        else if (response.settings?.openaikey?.textparam1) ttsService = "openai";
         
         if (!response.settings.ttsProvider) {
             response.settings.ttsProvider = {};
         }
         response.settings.ttsProvider.optionsetting = ttsService;
+    }
+    
+    // Handle featured TTS provider (for param2)
+    if (!response.settings?.ttsProvider?.optionsetting2) {
+        let ttsService = "system";
+        if (response.settings?.ttskey?.textparam2) ttsService = "google";
+        else if (response.settings?.googleAPIKey?.textparam2) ttsService = "google";
+        else if (response.settings?.elevenlabskey?.textparam2) ttsService = "elevenlabs";
+        else if (response.settings?.speechifykey?.textparam2) ttsService = "speechify";
+        else if (response.settings?.openaikey?.textparam2) ttsService = "openai";
+        
+        if (!response.settings.ttsProvider) {
+            response.settings.ttsProvider = {};
+        }
+        response.settings.ttsProvider.optionsetting2 = ttsService;
     }
     
     // Handle secondary TTS provider (for param10)
@@ -1400,6 +1769,7 @@ function setupTtsProviders(response) {
         else if (response.settings?.googleAPIKey?.textparam10) ttsService = "google";
         else if (response.settings?.elevenlabskey?.textparam10) ttsService = "elevenlabs";
         else if (response.settings?.speechifykey?.textparam10) ttsService = "speechify";
+        else if (response.settings?.openaikey?.textparam10) ttsService = "openai";
         
         if (!response.settings.ttsProvider) {
             response.settings.ttsProvider = {};
@@ -1419,16 +1789,19 @@ function processObjectSetting(key, settingObj, sync, paramNums, response) { // A
         }
 
         // Process number settings
-        const numSettingKey = `numbersetting${paramNum}`;
-        if (numSettingKey in settingObj) {
-            const ele = document.querySelector(`input[data-${numSettingKey}='${key}']`);
+        // Special case: for param 1, the stored key is 'numbersetting' and the DOM attribute is 'data-numbersetting'
+        const isParamOne = String(paramNum) === '1';
+        const storedNumKey = isParamOne ? 'numbersetting' : `numbersetting${paramNum}`;
+        const attrNumSuffix = isParamOne ? '' : String(paramNum);
+        if (storedNumKey in settingObj) {
+            const ele = document.querySelector(`input[data-numbersetting${attrNumSuffix}='${key}']`);
             if (ele) {
-                ele.value = settingObj[numSettingKey];
+                ele.value = settingObj[storedNumKey];
                 updateSettings(ele, sync);
 
                 const paramEle = document.querySelector(`input[data-param${paramNum}='${key}']`);
                 if (paramEle && paramEle.checked) {
-                    updateSettings(paramEle, false, parseFloat(settingObj[numSettingKey]));
+                    updateSettings(paramEle, false, parseFloat(settingObj[storedNumKey]));
                 }
             }
         }
@@ -1470,13 +1843,40 @@ function processObjectSetting(key, settingObj, sync, paramNums, response) { // A
                 ele.value = storedValue;
                 updateSettings(ele, sync);
 
-                if (key == "ttsprovider" && paramNum == 10) { // Ensure paramNum is compared as number or string consistently
+                if (key == "ttsprovider" && paramNum == 2) { 
+                    handleTTSProvider2Visibility(ele.value); 
+                } else if (key == "ttsprovider" && paramNum == 10) { // Ensure paramNum is compared as number or string consistently
                     handleTTSProvider10Visibility(ele.value); 
                 }
 
                 const paramEle = document.querySelector(`input[data-param${paramNum}='${key}']`);
                 if (paramEle && paramEle.checked) {
                     updateSettings(paramEle, false, settingObj[optionParamKey]);
+                }
+                
+                // Handle OpenAI custom voice/model dropdowns
+                if (key === 'voiceopenai' && storedValue === 'custom') {
+                    // Show custom voice input for the appropriate section
+                    const customInputId = paramNum === 1 ? 'openaiCustomVoice' : 
+                                       paramNum === 2 ? 'openaiCustomVoice2' : 
+                                       paramNum === 10 ? 'openaiCustomVoice10' : null;
+                    if (customInputId) {
+                        const customInput = document.getElementById(customInputId);
+                        if (customInput) {
+                            customInput.style.display = 'inline-block';
+                        }
+                    }
+                } else if (key === 'openaimodel' && storedValue === 'custom') {
+                    // Show custom model input for the appropriate section
+                    const customInputId = paramNum === 1 ? 'openaiCustomModel' : 
+                                       paramNum === 2 ? 'openaiCustomModel2' : 
+                                       paramNum === 10 ? 'openaiCustomModel10' : null;
+                    if (customInputId) {
+                        const customInput = document.getElementById(customInputId);
+                        if (customInput) {
+                            customInput.style.display = 'inline-block';
+                        }
+                    }
                 }
             }
         }
@@ -1550,7 +1950,13 @@ function processObjectSetting(key, settingObj, sync, paramNums, response) { // A
 
         const ele = document.querySelector(`input[data-textsetting='${key}'],textarea[data-textsetting='${key}']`);
         if (ele) {
-            ele.value = valueToSet; // valueToSet is settingObj.textsetting
+            // For fields that default to "all/none" when empty, don't load saved values
+            const defaultToEmptyFields = ['eventsSources', 'ttssources', 'relaytargets'];
+            if (defaultToEmptyFields.includes(key)) {
+                ele.value = ''; // Always start with empty for these fields
+            } else {
+                ele.value = valueToSet; // valueToSet is settingObj.textsetting
+            }
 
             if (ele.dataset.palette) {
                 try {
@@ -1598,6 +2004,59 @@ function processObjectSetting(key, settingObj, sync, paramNums, response) { // A
                 handleAIProviderVisibility(ele.value);
             } else if (key == "ttsProvider") {
                 handleTTSProviderVisibility(ele.value);
+            } else if (key == "featuredOverlayStyle" ) {
+				applyFeaturedOverlayPreset(ele.value);
+			 } else if (key == "overlayPreset") {
+				// Update the dock URL to match the saved overlay preset
+				const dockDiv = document.getElementById('dock');
+				const dockLink = document.querySelector('#dock a, a[href*="dock.html"]');
+				
+				if (dockDiv && ele.value) {
+					// An overlay is selected, update the URL
+					const overlayUrl = baseURL + ele.value;
+					
+					// Extract existing parameters from current dock URL
+					let existingParams = '';
+					if (dockDiv.raw && dockDiv.raw.includes('?')) {
+						existingParams = dockDiv.raw.split('?')[1];
+					}
+					
+					// Build new URL with overlay
+					let newUrl = overlayUrl;
+					if (existingParams) {
+						newUrl += '?' + existingParams;
+					}
+					
+					// Update the dock URL
+					dockDiv.raw = newUrl;
+					if (dockLink) {
+						dockLink.href = newUrl;
+						dockLink.innerText = document.body.classList.contains("hidelinks") ? "Click to open link" : newUrl;
+					}
+					
+                    // Hide ONLY the streaming chat (dock) option wrappers
+                    document.querySelectorAll("input.collapsible-input[id^='wrapper-chat-']").forEach(inp => {
+                        const wrapper = inp.closest('.wrapper');
+                        if (wrapper) wrapper.style.display = 'none';
+                    });
+				} else {
+                    // Show ONLY the streaming chat (dock) option wrappers when no overlay is selected
+                    document.querySelectorAll("input.collapsible-input[id^='wrapper-chat-']").forEach(inp => {
+                        const wrapper = inp.closest('.wrapper');
+                        if (wrapper) wrapper.style.display = '';
+                    });
+				}
+			 }
+        }
+    }
+
+    if ("optionsetting2" in settingObj) {
+        const ele = document.querySelector(`select[data-optionsetting2='${key}']`);
+        if (ele) {
+            ele.value = settingObj.optionsetting2;
+            updateSettings(ele, sync);
+            if (key == "ttsProvider") {
+                handleTTSProvider2Visibility(ele.value);
             }
         }
     }
@@ -1634,6 +2093,13 @@ function processObjectSetting(key, settingObj, sync, paramNums, response) { // A
 
 function update(response, sync = true) {
     log("update-> response: ", response);
+    
+    // Skip update if we're loading a poll
+    if (window.isLoadingPoll) {
+        log("Skipping update during poll load");
+        return;
+    }
+    
     if (response !== undefined) {
         if (response.documents) {
             updateDocumentList(response.documents);
@@ -1716,6 +2182,13 @@ function update(response, sync = true) {
 
             createTabsFromSettings(response); // Assuming createTabsFromSettings is defined
 
+            // Check if MIDI is enabled and initialize if needed
+            const midiCheckbox = document.querySelector('input[data-setting="midi"]');
+            if (midiCheckbox && midiCheckbox.checked) {
+                // MIDI was enabled in settings, initialize the dropdown
+                handleMidiToggle(true);
+            }
+
             // Refresh all page links.
             refreshLinks();
 
@@ -1727,7 +2200,7 @@ function update(response, sync = true) {
                     'docklink', 'cohostlink', 'privatechatbotlink', 'chatbotlink',
                     'overlaylink', 'emoteswalllink', 'hypemeterlink', 'waitlistlink',
                     'tipjarlink', 'tickerlink', 'wordcloudlink', 'polllink', 'flowactionslink',
-                    'battlelink', 'custom-gif-commandslink', 'creditslink', 'giveawaylink', 'gameslink', 'leaderboardlink',
+                    'battlelink', 'custom-gif-commandslink', 'creditslink', 'giveawaylink', 'gameslink', 'leaderboardlink', 'scoreboard',
                     // Add other link IDs that are generated and need cleaning
                 ];
 
@@ -1787,6 +2260,19 @@ function update(response, sync = true) {
 function processParam(key, paramNum, settingObj, sync) {
     let paramKey = `param${paramNum}`;
     let ele = document.querySelector(`input[data-${paramKey}='${key}']`);
+
+    if (!ele && paramNum === 3 && key.startsWith('limit=')) {
+        const legacyValue = parseInt(key.split('=')[1], 10);
+        ele = document.querySelector(`input[data-${paramKey}='limit']`);
+        if (ele && !Number.isNaN(legacyValue)) {
+            const suffix = paramNum === 1 ? '' : paramNum;
+            const numberInput = document.querySelector(`input[data-numbersetting${suffix}='limit']`);
+            if (numberInput) {
+                numberInput.value = legacyValue;
+            }
+        }
+    }
+
     if (!ele) return;
 
     ele.checked = settingObj[paramKey]; // Set the checked state based on loaded setting.
@@ -1859,7 +2345,7 @@ function handleAIProviderVisibility(provider) {
 // Handle TTS provider visibility
 function handleTTSProviderVisibility(provider) {
     // Hide all TTS elements
-    ["systemTTS", "elevenlabsTTS", "googleTTS", "speechifyTTS", "kokoroTTS"].forEach(id => {
+    ["systemTTS", "elevenlabsTTS", "googleTTS", "speechifyTTS", "kokoroTTS", "kittenTTS", "openaiTTS"].forEach(id => {
         document.getElementById(id)?.classList.add("hidden");
     });
     
@@ -1874,13 +2360,17 @@ function handleTTSProviderVisibility(provider) {
         document.getElementById("speechifyTTS").classList.remove("hidden");
     } else if (provider == "kokoro") {
         document.getElementById("kokoroTTS").classList.remove("hidden");
+    } else if (provider == "kitten") {
+        document.getElementById("kittenTTS").classList.remove("hidden");
+    } else if (provider == "openai") {
+        document.getElementById("openaiTTS").classList.remove("hidden");
     }
 }
 
 // Handle secondary TTS provider visibility
 function handleTTSProvider10Visibility(provider) {
     // Hide all TTS10 elements
-    ["systemTTS10", "elevenlabsTTS10", "googleTTS10", "speechifyTTS10", "kokoroTTS10"].forEach(id => {
+    ["systemTTS10", "elevenlabsTTS10", "googleTTS10", "speechifyTTS10", "kokoroTTS10", "kittenTTS10", "openaiTTS10"].forEach(id => {
         document.getElementById(id)?.classList.add("hidden");
     });
     
@@ -1895,6 +2385,39 @@ function handleTTSProvider10Visibility(provider) {
         document.getElementById("speechifyTTS10").classList.remove("hidden");
     } else if (provider == "kokoro") {
         document.getElementById("kokoroTTS10").classList.remove("hidden");
+    } else if (provider == "kitten") {
+        document.getElementById("kittenTTS10").classList.remove("hidden");
+    } else if (provider == "openai") {
+        document.getElementById("openaiTTS10").classList.remove("hidden");
+    }
+}
+
+// Handle featured TTS provider visibility (param2)
+function handleTTSProvider2Visibility(provider) {
+    // Hide all TTS2 elements
+    ["systemTTS2", "elevenlabsTTS2", "googleTTS2", "speechifyTTS2", "kokoroTTS2", "kittenTTS2", "openaiTTS2", "piperTTS2", "espeakTTS2"].forEach(id => {
+        document.getElementById(id)?.classList.add("hidden");
+    });
+    
+    // Show element based on selected provider
+    if (provider == "system") {
+        document.getElementById("systemTTS2").classList.remove("hidden");
+    } else if (provider == "elevenlabs") {
+        document.getElementById("elevenlabsTTS2").classList.remove("hidden");
+    } else if (provider == "google") {
+        document.getElementById("googleTTS2").classList.remove("hidden");
+    } else if (provider == "speechify") {
+        document.getElementById("speechifyTTS2").classList.remove("hidden");
+    } else if (provider == "kokoro") {
+        document.getElementById("kokoroTTS2").classList.remove("hidden");
+    } else if (provider == "kitten") {
+        document.getElementById("kittenTTS2").classList.remove("hidden");
+    } else if (provider == "openai") {
+        document.getElementById("openaiTTS2").classList.remove("hidden");
+    } else if (provider == "piper") {
+        document.getElementById("piperTTS2").classList.remove("hidden");
+    } else if (provider == "espeak") {
+        document.getElementById("espeakTTS2").classList.remove("hidden");
     }
 }
 
@@ -2156,6 +2679,7 @@ function getTargetMap() {
 		'poll': 16,
 		'eventsdashboard': 17,
 		'flowactions': 18,
+		'scoreboard': 21
     };
 }
 function handleElementParam(ele, targetId, paramType, sync, value = null) {
@@ -2287,33 +2811,49 @@ function handleElementParam(ele, targetId, paramType, sync, value = null) {
         }, function (response) {});
 
         // Save associated text/number/option value if applicable, using the key part
-        const associatedInput = document.querySelector(`[data-numbersetting${paramNum}='${keyOnly}'], [data-optionparam${paramNum}='${keyOnly}'], [data-textparam${paramNum}='${keyOnly}']`);
+        const numberSettingSuffixSave = paramNum === '1' ? '' : paramNum;
+        const associatedInput = document.querySelector(
+            `[data-numbersetting${numberSettingSuffixSave}='${keyOnly}'], ` +
+            `[data-optionparam${paramNum}='${keyOnly}'], ` +
+            `[data-textparam${paramNum}='${keyOnly}']`
+        );
         if (associatedInput && (associatedInput.value !== undefined || associatedInput.code !== undefined)) {
-             const inputType = associatedInput.dataset.numbersetting ? `numbersetting${paramNum}` : associatedInput.dataset.optionparam ? `optionparam${paramNum}` : `textparam${paramNum}`;
-             chrome.runtime.sendMessage({
-                 cmd: "saveSetting",
-                 type: inputType,
-                 target: ele.dataset.target || null,
-                 setting: keyOnly,
-                 value: associatedInput.code || associatedInput.value
-             }, function (response) {});
+            const isNum = associatedInput.hasAttribute(`data-numbersetting${numberSettingSuffixSave}`);
+            const isOpt = associatedInput.hasAttribute(`data-optionparam${paramNum}`);
+            const inputType = isNum
+                ? (paramNum === '1' ? 'numbersetting' : `numbersetting${paramNum}`)
+                : (isOpt ? `optionparam${paramNum}` : `textparam${paramNum}`);
+            chrome.runtime.sendMessage({
+                cmd: "saveSetting",
+                type: inputType,
+                target: ele.dataset.target || null,
+                setting: keyOnly,
+                value: associatedInput.code || associatedInput.value
+            }, function (response) {});
         }
     }
 
     // Handle "siblings" with the same param prefix
+    // Only uncheck related toggles that control the same key (e.g., opacity=..., scale=...)
     const paramPrefix = paramValue.split('=')[0];
-    document.querySelectorAll(`input[data-${paramType}^='${paramPrefix}']:not([data-${paramType}='${paramValue}'])`).forEach(ele1 => {
-        if (ele1 && ele1.checked) {
-            ele1.checked = false;
-            updateSettings(ele1, sync);
-        }
-    });
+    // Only handle siblings if the param contains '=' (like scale=2, opacity=0.3) or the bare key itself
+    if (paramValue.includes('=') || paramValue === paramPrefix) {
+        // Select only inputs that control the same key for this param group, excluding the current element
+        const selector = `input[data-${paramType}^='${paramPrefix}='], input[data-${paramType}='${paramPrefix}']`;
+        document.querySelectorAll(selector).forEach(ele1 => {
+            if (ele1 !== ele && ele1.checked) {
+                ele1.checked = false;
+                updateSettings(ele1, sync);
+            }
+        });
+    }
 
     return true;
 }
 function handleExclusiveCases(ele, paramType, paramValue, sync) {
-    if (paramType !== 'param1' && paramType !== 'param5') return;
-    
+    const exclusiveTypes = ['param1', 'param4', 'param5'];
+    if (!exclusiveTypes.includes(paramType)) return;
+
     // Handle exclusive settings like darkmode/lightmode
     const exclusiveMap = {
         param1: {
@@ -2322,13 +2862,17 @@ function handleExclusiveCases(ele, paramType, paramValue, sync) {
             'onlytwitch': 'hidetwitch',
             'hidetwitch': 'onlytwitch'
         },
+        param4: {
+            'alignright': 'align=center',
+            'align=center': 'alignright'
+        },
         param5: {
             'alignright': 'aligncenter',
             'aligncenter': 'alignright'
         }
     };
-    
-    if (exclusiveMap[paramType][paramValue]) {
+
+    if (exclusiveMap[paramType] && exclusiveMap[paramType][paramValue]) {
         const oppositeKey = exclusiveMap[paramType][paramValue];
         const oppositeEle = document.querySelector(`input[data-${paramType}='${oppositeKey}']`);
         if (oppositeEle && oppositeEle.checked) {
@@ -2581,6 +3125,11 @@ function handleSetting(ele, sync) {
         refreshLinks();
     }
     
+    // Handle MIDI toggle
+    if (ele.dataset.setting === "midi") {
+        handleMidiToggle(ele.checked);
+    }
+    
     if (sync) {
         chrome.runtime.sendMessage({
             cmd: "saveSetting",
@@ -2637,9 +3186,10 @@ function handleSpecialSettings(ele, sync) {
 }
 
 function handleOptionSetting(ele, sync) {
-    if (!ele.dataset.optionsetting && !ele.dataset.optionsetting10) return false;
+    if (!ele.dataset.optionsetting && !ele.dataset.optionsetting2 && !ele.dataset.optionsetting10) return false;
     
-    const settingType = ele.dataset.optionsetting ? 'optionsetting' : 'optionsetting10';
+    const settingType = ele.dataset.optionsetting ? 'optionsetting' : 
+                       (ele.dataset.optionsetting2 ? 'optionsetting2' : 'optionsetting10');
     const settingValue = ele.dataset[settingType];
     
     // Handle poll type
@@ -2709,10 +3259,10 @@ function handleOptionSetting(ele, sync) {
     // Handle TTS Provider settings
     if (settingValue === "ttsProvider") {
 		
-        const suffix = settingType === 'optionsetting10' ? '10' : '';
+        const suffix = settingType === 'optionsetting2' ? '2' : (settingType === 'optionsetting10' ? '10' : '');
         const ttsProviderElements = [
             `systemTTS${suffix}`, `elevenlabsTTS${suffix}`, `googleTTS${suffix}`, 
-            `speechifyTTS${suffix}`, `kokoroTTS${suffix}`
+            `speechifyTTS${suffix}`, `kokoroTTS${suffix}`, `kittenTTS${suffix}`, `openaiTTS${suffix}`, `piperTTS${suffix}`, `espeakTTS${suffix}`
         ];
         
         ttsProviderElements.forEach(id => {
@@ -2739,6 +3289,40 @@ function handleOptionSetting(ele, sync) {
     }
     
     return true;
+}
+
+function updateRangeDisplay(ele) {
+    if (!ele || ele.type !== 'range') {
+        return;
+    }
+
+    const displayId = ele.dataset.rangeDisplay;
+    if (!displayId) {
+        return;
+    }
+
+    const displayEle = document.getElementById(displayId);
+    if (!displayEle) {
+        return;
+    }
+
+    const suffix = ele.dataset.rangeSuffix || '';
+    const rawValue = parseFloat(ele.value);
+    if (Number.isNaN(rawValue)) {
+        return;
+    }
+
+    let formattedValue;
+    if (suffix === '%') {
+        formattedValue = `${Math.round(rawValue)}${suffix}`;
+    } else {
+        formattedValue = rawValue.toFixed(2);
+        if (suffix) {
+            formattedValue += suffix;
+        }
+    }
+
+    displayEle.textContent = formattedValue;
 }
 
 function handleNumberSetting(ele, sync) {
@@ -2782,6 +3366,10 @@ function handleNumberSetting(ele, sync) {
             targetElement.raw = updateURL(`${settingValue}=${ele.value}`, targetElement.raw);
         }
         
+        if (ele.type === 'range') {
+            ele.dataset.rangePrevValue = ele.value;
+        }
+        updateRangeDisplay(ele);
         return true;
     }
     
@@ -2917,6 +3505,13 @@ function updateSettings(ele, sync = true, value = null) {
     
     // Handle text settings
     if (ele.dataset.textsetting && sync) {
+        // For fields that default to "all/none" when empty, don't save empty values
+        const defaultToEmptyFields = ['eventsSources', 'ttssources', 'relaytargets'];
+        if (defaultToEmptyFields.includes(ele.dataset.textsetting) && !ele.value.trim()) {
+            // Don't save empty values for these fields
+            return;
+        }
+        
         chrome.runtime.sendMessage({
             cmd: "saveSetting",
             type: "textsetting",
@@ -3022,7 +3617,8 @@ function refreshLinks(){
       'creditslink': 'credits',
       'privatechatbotlink': 'privatechatbot',
       'eventsdashboardlink': 'eventsdashboard',
-      'custom-gif-commandslink': 'custom-gif-commands'
+      'custom-gif-commandslink': 'custom-gif-commands',
+	  'scoreboardlink': 'scoreboard'
     };
     const linkIdsToClean = Object.keys(linkIdToDivIdMap);
 
@@ -3052,6 +3648,25 @@ function refreshLinks(){
   } catch (e) {
     console.error("Error cleaning TTS params from links:", e);
   }
+}
+
+function handleRangeInput(event) {
+    const rangeEle = event?.target || this;
+    if (!rangeEle) {
+        return;
+    }
+
+    updateRangeDisplay(rangeEle);
+
+    const currentValue = rangeEle.value;
+    const lastValue = rangeEle.dataset.rangePrevValue;
+    const shouldSync = !event || event.type !== 'change' || lastValue !== currentValue;
+
+    if (shouldSync) {
+        updateSettings.call(rangeEle, event);
+    }
+
+    rangeEle.dataset.rangePrevValue = currentValue;
 }
 
 if (!chrome.browserAction){
@@ -3334,6 +3949,14 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
                 rate: document.querySelector('[data-param1="kokorospeed"]').checked ?  parseFloat(document.querySelector('[data-numbersetting="kokorospeed"]')?.value) || 1.0 : 1.0,
             },
             
+            // Kitten TTS settings
+            kitten: {
+                voice: document.getElementById('kittenVoiceSelect')?.selectedOptions[0]?.value || "expr-voice-4-f",
+                speed: document.querySelector('[data-param1="kittenspeed"]')?.checked ?  
+                    parseFloat(document.querySelector('[data-numbersetting="kittenspeed"]')?.value) || 1.0 : 1.0,
+                sampleRate: 24000  // Fixed value - not configurable in new library
+            },
+            
             // Google Cloud TTS settings
             google: {
                 key: document.getElementById('googleAPIKey')?.value || document.getElementById('ttskey')?.value,
@@ -3370,6 +3993,35 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
                 lang: document.querySelector('[data-param1="speechifylang"]').checked ? document.querySelector('[data-optionparam1="speechifylang"]')?.value || 'en-US' : 'en-US',
                 speed: document.querySelector('[data-param1="speechifyspeed"]').checked ? parseFloat(document.querySelector('[data-numbersetting="speechifyspeed"]')?.value) || 1.0 : 1.0,
                 model: document.querySelector('[data-param1="speechifymodel"]').checked ? document.querySelector('[data-optionparam1="speechifymodel"]')?.value || 'simba-english' : 'simba-english'
+            },
+            
+            // OpenAI settings
+            openai: {
+                key: document.getElementById('openaiAPIKey')?.value,
+                endpoint: document.getElementById('openaiEndpoint')?.value || "https://api.openai.com/v1/audio/speech",
+                voice: (() => {
+                    const voiceSelect = document.getElementById('openaiVoiceSelect');
+                    if (voiceSelect?.value === 'custom') {
+                        const customVoice = document.getElementById('openaiCustomVoice')?.value;
+                        return customVoice || 'alloy';
+                    }
+                    return voiceSelect?.value || 'alloy';
+                })(),
+                model: (() => {
+                    if (document.querySelector('[data-param1="openaimodel"]').checked) {
+                        const modelSelect = document.querySelector('[data-optionparam1="openaimodel"]');
+                        if (modelSelect?.value === 'custom') {
+                            const customModel = document.getElementById('openaiCustomModel')?.value;
+                            return customModel || 'tts-1';
+                        }
+                        return modelSelect?.value || 'tts-1';
+                    }
+                    return 'tts-1';
+                })(),
+                speed: document.querySelector('[data-param1="openaispeed"]').checked ? 
+                    parseFloat(document.querySelector('[data-numbersetting="openaispeed"]')?.value) || 1.0 : 1.0,
+                format: document.querySelector('[data-param1="openaiformat"]').checked ? 
+                    document.querySelector('[data-optionparam1="openaiformat"]')?.value || 'mp3' : 'mp3'
             }
         };
         
@@ -3403,6 +4055,7 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
         if (settings.google.key) return 'Google Cloud TTS';
         if (settings.elevenLabs.key) return 'ElevenLabs TTS';
         if (settings.speechify.key) return 'Speechify TTS';
+        if (settings.openai.key) return 'OpenAI TTS';
         return 'System TTS';
     },
     
@@ -3413,10 +4066,17 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
         // Check if the provider supports testing
         const provider = document.getElementById('ttsProvider').value || "system";
         if (provider === 'piper' || provider === 'espeak') {
-            let warningMsg = getTranslation("tts-test-not-available") || "Testing is not available for {provider}. This TTS provider works during streaming only.";
+            let warningMsg = getTranslation("tts-test-not-available", "Testing is not available for {provider}. This TTS provider works during streaming only.");
             warningMsg = warningMsg.replace('{provider}', serviceName);
             this.showFeedback(warningMsg, 'error');
             return;
+        }
+        
+        if (provider === 'kitten') {
+            let warningMsg = getTranslation("tts-test-limited", "Testing for {provider} requires significant browser resources. Works best during streaming.");
+            warningMsg = warningMsg.replace('{provider}', serviceName);
+            this.showFeedback(warningMsg, 'warning');
+            // Continue with test despite warning
         }
         
         this.showFeedback(`Testing ${serviceName}...`, 'info');
@@ -3443,6 +4103,9 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
             }
             if (serviceName === 'Speechify TTS' && !settings.speechify.key) {
                 throw new Error('Speechify API key is required');
+            }
+            if (serviceName === 'OpenAI TTS' && !settings.openai.key) {
+                throw new Error('OpenAI API key is required');
             }
 
             this.speak(testPhrase, true);
@@ -3471,9 +4134,17 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
                 if (!this.premiumQueueActive) {
                     await this.speechifyTTS(text, settings);
                 }
+            } else if ((settings.service == "openai") && settings.openai.key) {
+                if (!this.premiumQueueActive) {
+                    await this.openaiTTS(text, settings);
+                }
 			} else if (settings.service == "kokoro") {
                 if (!this.premiumQueueActive) {
                     await this.kokoroTTS(text, settings);
+                }
+            } else if (settings.service == "kitten") {
+                if (!this.premiumQueueActive) {
+                    await this.kittenTTS(text, settings);
                 }
             } else if (!settings.service || (settings.service == "system")) {
                 this.systemTTS(text, settings);
@@ -3576,6 +4247,76 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
 			this.finishedAudio();
 		}
 	},
+    
+    async kittenTTS(text, settings) {
+        try {
+            // Load ONNX Runtime first if not loaded
+            if (typeof ort === 'undefined') {
+                const ortScript = document.createElement('script');
+                ortScript.src = './thirdparty/ort.min.js';
+                await new Promise((resolve, reject) => {
+                    ortScript.onload = resolve;
+                    ortScript.onerror = reject;
+                    document.head.appendChild(ortScript);
+                });
+                
+                // Configure WASM paths after loading ONNX Runtime
+                if (typeof ort !== 'undefined' && ort.env && ort.env.wasm) {
+                    ort.env.wasm.wasmPaths = './thirdparty/';
+                    ort.env.wasm.numThreads = 1;
+                    ort.env.wasm.simd = false;
+                    console.log("Configured ONNX Runtime WASM paths for popup");
+                }
+            }
+            
+            // Load Kitten TTS module if not loaded
+            if (!window.kittenTtsInstance) {
+                // Use absolute URL for chrome extension context
+                const baseUrl = chrome.runtime.getURL('');
+                const moduleUrl = baseUrl + 'thirdparty/kitten-tts/kitten-tts-lib.js';
+                
+                const { KittenTTS } = await import(moduleUrl);
+                
+                window.kittenTtsInstance = new KittenTTS();
+                
+                // Initialize with model, voices, and WASM paths using absolute URLs
+                const modelUrl = baseUrl + 'thirdparty/kitten-tts/kitten_tts_nano_v0_1.onnx';
+                const voicesUrl = baseUrl + 'thirdparty/kitten-tts/voices.json';
+                // Don't set WASM path - let ONNX runtime use its default
+                await window.kittenTtsInstance.init(modelUrl, voicesUrl);
+            }
+            
+            this.premiumQueueActive = true;
+            
+            // Generate speech with selected voice and speed
+            const audioBlob = await window.kittenTtsInstance.generateSpeech(
+                text, 
+                settings.kitten.voice || 'expr-voice-4-f',
+                settings.kitten.speed || 1.0
+            );
+            
+            // Play audio
+            if (!this.audio) {
+                this.audio = document.createElement("audio");
+                this.audio.onended = () => this.finishedAudio();
+            }
+            
+            this.audio.src = URL.createObjectURL(audioBlob);
+            if (settings.volume) {
+                this.audio.volume = settings.volume;
+            }
+            
+            await this.audio.play().catch(e => {
+                console.error("Audio playback failed:", e);
+                this.finishedAudio();
+            });
+            
+        } catch (error) {
+            console.error("Kitten TTS error:", error);
+            this.showFeedback(`Kitten TTS Error: ${error.message}`, 'error');
+            this.finishedAudio();
+        }
+    },
     
     googleTTS(text, settings) {
         this.premiumQueueActive = true;
@@ -3741,6 +4482,28 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
         }, 'base64');
     },
     
+    openaiTTS(text, settings) {
+        this.premiumQueueActive = true;
+        const url = settings.openai.endpoint || "https://api.openai.com/v1/audio/speech";
+        
+        const data = {
+            model: settings.openai.model,
+            input: text,
+            voice: settings.openai.voice,
+            response_format: settings.openai.format,
+            speed: settings.openai.speed
+        };
+        
+        this.fetchAudioContent(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${settings.openai.key}`
+            },
+            body: JSON.stringify(data)
+        }, 'blob');
+    },
+    
     async fetchAudioContent(url, options, type) {
 		try {
 			const response = await fetch(url, options);
@@ -3753,7 +4516,7 @@ const TTSManager = {  // this is for testing the audio I think; not for managing
 				if (contentType && contentType.includes("application/json")) {
 					const errorData = await response.json();
 					//console.log(errorData);
-					throw new Error(errorData?.message || errorData?.detail?.message || errorData?.error || `HTTP error! status: ${response.status}`);
+					throw new Error(errorData?.message || errorData?.detail?.message || errorData?.error?.message || errorData?.error || `HTTP error! status: ${response.status}`);
 				}
 				throw new Error(`HTTP error! status: ${response.status}`);
 			}
@@ -4053,6 +4816,9 @@ const PollManager = {
         const poll = this.savedPolls.find(p => p.id === pollId);
         if (!poll) return;
 
+        // Set flag to prevent update() from reverting values
+        window.isLoadingPoll = true;
+
         // Update all form elements with the poll's settings
         const elements = {
             '[data-optionsetting="pollType"]': poll.settings.pollType,
@@ -4079,6 +4845,11 @@ const PollManager = {
 
         this.currentPollId = pollId;
         this.updatePollsList();
+        
+        // Clear flag after a short delay to ensure all updates have been processed
+        setTimeout(() => {
+            window.isLoadingPoll = false;
+        }, 500);
     },
 
     updatePollsList() {
@@ -4115,6 +4886,16 @@ const PollManager = {
 
 
 document.addEventListener("DOMContentLoaded", async function(event) {
+	// Add event listener for Event Flow Editor link
+	const eventFlowLink = document.getElementById('open-event-flow-editor-link');
+	if (eventFlowLink) {
+		eventFlowLink.addEventListener('click', function(e) {
+			e.preventDefault();
+			openEventFlowEditor();
+			return false;
+		});
+	}
+	
 	// Initialize ProfileManager after DOM is ready
 	ProfileManager.init();
 	
@@ -4125,6 +4906,49 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 			ProfileManager.saveCurrentProfile();
 		});
 	}
+	
+	// Add event listeners for OpenAI custom voice/model dropdowns
+	const setupOpenAICustomInputs = (voiceSelectId, modelSelectId, customVoiceId, customModelId) => {
+		const voiceSelect = document.getElementById(voiceSelectId);
+		const modelSelect = document.getElementById(modelSelectId);
+		const customVoiceInput = document.getElementById(customVoiceId);
+		const customModelInput = document.getElementById(customModelId);
+		
+		if (voiceSelect && customVoiceInput) {
+			voiceSelect.addEventListener('change', function() {
+				if (this.value === 'custom') {
+					customVoiceInput.style.display = 'inline-block';
+					customVoiceInput.focus();
+				} else {
+					customVoiceInput.style.display = 'none';
+					customVoiceInput.value = '';
+				}
+				updateSettings();
+			});
+			
+			customVoiceInput.addEventListener('input', updateSettings);
+		}
+		
+		if (modelSelect && customModelInput) {
+			modelSelect.addEventListener('change', function() {
+				if (this.value === 'custom') {
+					customModelInput.style.display = 'inline-block';
+					customModelInput.focus();
+				} else {
+					customModelInput.style.display = 'none';
+					customModelInput.value = '';
+				}
+				updateSettings();
+			});
+			
+			customModelInput.addEventListener('input', updateSettings);
+		}
+	};
+	
+	// Setup for all three sections
+	setupOpenAICustomInputs('openaiVoiceSelect', 'openaiModelSelect', 'openaiCustomVoice', 'openaiCustomModel');
+	setupOpenAICustomInputs('openaiVoiceSelect2', 'openaiModelSelect2', 'openaiCustomVoice2', 'openaiCustomModel2');
+	setupOpenAICustomInputs('openaiVoiceSelect10', 'openaiModelSelect10', 'openaiCustomVoice10', 'openaiCustomModel10');
 	
 	// Language selector handling
 	const languageIcon = document.getElementById('languageIcon');
@@ -4292,7 +5116,7 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 			  addContainer.innerHTML = `
 				<input type="text" id="new${id}" placeholder="Add username">
 				<select id="new${id}Type">
-				  <option value="" selected>All sources</option>
+				  <option value="" selected>Select Sources</option>
 				  ${Array.from(sourcesList).sort().map(source => 
 					`<option value="${source}">${source.charAt(0).toUpperCase() + source.slice(1)}</option>`
 				  ).join('')}
@@ -4368,7 +5192,7 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 				if (sourcesList && sourcesList.size > 0) {
 				  addContainer.innerHTML = `
 					<select id="new${id}Type">
-					  <option value="" selected>All sources</option>
+					  <option value="" selected>Select Sources</option>
 					  ${Array.from(sourcesList).sort().map(source => 
 						`<option value="${source}">${source.charAt(0).toUpperCase() + source.slice(1)}</option>`
 					  ).join('')}
@@ -4671,6 +5495,315 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 		ragFileManagement.style.display = this.checked ? 'block' : 'none';
 	});
 
+	// Points System button handlers
+	const manageUserPointsBtn = document.getElementById('manageUserPoints');
+	if (manageUserPointsBtn) {
+		manageUserPointsBtn.addEventListener('click', async function() {
+			const username = await prompt("Enter username to manage points for:");
+			if (!username) return;
+			
+			const action = await prompt("Enter action (add/subtract/set):");
+			if (!action || !['add', 'subtract', 'set'].includes(action.toLowerCase())) {
+				alert("Invalid action. Please use 'add', 'subtract', or 'set'.");
+				return;
+			}
+			
+			const pointsStr = await prompt(`Enter points to ${action}:`);
+			const points = parseInt(pointsStr);
+			if (isNaN(points)) {
+				alert("Invalid points value. Please enter a number.");
+				return;
+			}
+			
+			if (confirm(`Are you sure you want to ${action} ${points} points ${action === 'subtract' ? 'from' : 'to'} ${username}?`)) {
+				chrome.runtime.sendMessage({
+					cmd: "manageUserPoints",
+					username: username,
+					action: action.toLowerCase(),
+					points: points
+				}, function(response) {
+					if (response && response.success) {
+						alert(`Successfully ${action === 'set' ? 'set' : action + 'ed'} ${points} points ${action === 'subtract' ? 'from' : 'for'} ${username}. New balance: ${response.newBalance}`);
+					} else {
+						alert(response.error || 'Failed to manage points. Please try again.');
+					}
+				});
+			}
+		});
+	}
+
+	const viewPointsLeaderboardBtn = document.getElementById('viewPointsLeaderboard');
+	if (viewPointsLeaderboardBtn) {
+		viewPointsLeaderboardBtn.addEventListener('click', function() {
+			// Open leaderboard in new tab
+			chrome.tabs.create({
+				url: chrome.runtime.getURL('leaderboard.html')
+			});
+		});
+	}
+
+	const resetPointsBtn = document.getElementById('resetPoints');
+	if (resetPointsBtn) {
+		resetPointsBtn.addEventListener('click', async function() {
+			if (confirm('Are you sure you want to reset all user points? This cannot be undone.')) {
+				chrome.runtime.sendMessage({
+					cmd: "resetAllPoints"
+				}, function(response) {
+					if (response && response.success) {
+						alert('All user points have been reset.');
+					} else {
+						alert('Failed to reset points. Please try again.');
+					}
+				});
+			}
+		});
+	}
+
+	// Initialize Spotify section inputs and handle manual saving
+	const spotifyClientIdInput = document.getElementById('spotifyClientId');
+	const spotifyClientSecretInput = document.getElementById('spotifyClientSecret');
+	
+	// Manual save function for Spotify credentials
+	function saveSpotifyCredentials() {
+		const clientId = spotifyClientIdInput?.value?.trim();
+		const clientSecret = spotifyClientSecretInput?.value?.trim();
+		
+		if (clientId || clientSecret) {
+			chrome.runtime.sendMessage({
+				cmd: "saveSetting",
+				type: "textsetting",
+				setting: "spotifyClientId",
+				value: clientId
+			});
+			
+			chrome.runtime.sendMessage({
+				cmd: "saveSetting",  
+				type: "textsetting",
+				setting: "spotifyClientSecret",
+				value: clientSecret
+			});
+			
+			console.log('Spotify credentials saved');
+		}
+	}
+	
+	// Save on input change
+	if (spotifyClientIdInput) {
+		spotifyClientIdInput.addEventListener('change', saveSpotifyCredentials);
+		spotifyClientIdInput.addEventListener('blur', saveSpotifyCredentials);
+	}
+	
+	if (spotifyClientSecretInput) {
+		spotifyClientSecretInput.addEventListener('change', saveSpotifyCredentials);
+		spotifyClientSecretInput.addEventListener('blur', saveSpotifyCredentials);
+	}
+	
+	// Spotify Auth Button
+	const spotifyAuthButton = document.getElementById('spotifyAuthButton');
+	const spotifyAuthStatus = document.getElementById('spotifyAuthStatus');
+	const spotifySignOutButton = document.getElementById('spotifySignOutButton');
+	
+	if (spotifyAuthButton) {
+		// Check if already authenticated (tokens are stored in settings object)
+		chrome.storage.local.get(['settings'], function(result) {
+			if (result.settings && result.settings.spotifyAccessToken) {
+				spotifyAuthStatus.style.display = 'inline';
+				spotifyAuthButton.querySelector('span').textContent = '🔄 Reconnect to Spotify';
+				if (spotifySignOutButton) {
+					spotifySignOutButton.style.display = 'inline-block';
+				}
+			}
+		});
+		
+		// Add manual callback handler for Electron app (ssapp)
+		if (window.ssapp) {
+			// Add a text input for manual callback URL
+			const callbackDiv = document.createElement('div');
+			callbackDiv.style.marginTop = '10px';
+			callbackDiv.style.display = 'none';
+			callbackDiv.id = 'spotifyCallbackDiv';
+			callbackDiv.innerHTML = `
+				<input type="text" id="spotifyCallbackInput" placeholder="Paste callback URL here" style="width: 100%; padding: 5px; margin: 5px 0;">
+				<button id="spotifyCallbackSubmit" class="button">Complete Auth</button>
+			`;
+			spotifyAuthButton.parentElement.appendChild(callbackDiv);
+			
+			// Only show callback input as a fallback if automatic auth fails
+			// Don't show it immediately anymore since we have automatic detection
+			
+			// Handle callback submission
+			document.getElementById('spotifyCallbackSubmit')?.addEventListener('click', function() {
+				const callbackUrl = document.getElementById('spotifyCallbackInput').value;
+				if (callbackUrl && callbackUrl.includes('code=')) {
+					chrome.runtime.sendMessage({
+						cmd: "spotifyManualCallback",
+						url: callbackUrl
+					}, response => {
+						console.log("Manual callback result:", response);
+						if (response && response.success) {
+							spotifyAuthStatus.style.display = 'inline';
+							spotifyAuthButton.querySelector('span').textContent = '🔄 Reconnect to Spotify';
+							if (spotifySignOutButton) {
+								spotifySignOutButton.style.display = 'inline-block';
+							}
+							callbackDiv.style.display = 'none';
+							document.getElementById('spotifyCallbackInput').value = '';
+							alert('Spotify connected successfully!');
+						} else {
+							alert('Failed to process callback: ' + (response?.error || 'Unknown error'));
+						}
+					});
+				} else {
+					alert('Please paste the complete callback URL');
+				}
+			});
+		}
+		
+		spotifyAuthButton.addEventListener('click', async function() {
+			// Prevent multiple clicks
+			if (spotifyAuthButton.disabled) {
+				console.log('Spotify auth already in progress');
+				return;
+			}
+			
+			// Disable button during auth
+			spotifyAuthButton.disabled = true;
+			spotifyAuthButton.querySelector('span').textContent = '⏳ Connecting...';
+			
+			console.log('Attempting Spotify auth...');
+			
+			// Try to open the background page directly if needed
+			try {
+				// First, try to communicate normally
+				chrome.runtime.sendMessage({cmd: "spotifyAuth"}, function(response) {
+					// Check for Chrome runtime errors
+					if (chrome.runtime.lastError) {
+						console.error('Chrome runtime error:', chrome.runtime.lastError);
+						// If communication failed, try opening background page directly
+						chrome.tabs.create({
+							url: chrome.runtime.getURL('background.html'),
+							active: false
+						}, function(tab) {
+							// Wait a bit for background page to load, then retry
+							setTimeout(() => {
+								chrome.runtime.sendMessage({cmd: "spotifyAuth"}, function(retryResponse) {
+									handleSpotifyAuthResponse(retryResponse);
+								});
+							}, 2000);
+						});
+						return;
+					}
+					
+					handleSpotifyAuthResponse(response);
+				});
+			} catch (error) {
+				console.error('Error during Spotify auth:', error);
+				spotifyAuthButton.disabled = false;
+				spotifyAuthButton.querySelector('span').textContent = '🔗 Connect to Spotify';
+				alert('Failed to initiate Spotify connection. Please try again.');
+			}
+			
+			function handleSpotifyAuthResponse(response) {
+				console.log('Spotify auth response received:', response);
+				spotifyAuthButton.disabled = false;
+				const callbackDiv = document.getElementById('spotifyCallbackDiv');
+				
+				if (response && response.success) {
+					spotifyAuthStatus.style.display = 'inline';
+					spotifyAuthButton.querySelector('span').textContent = '🔄 Reconnect to Spotify';
+					if (spotifySignOutButton) {
+						spotifySignOutButton.style.display = 'inline-block';
+					}
+					// Hide manual callback input on success
+					if (window.ssapp && callbackDiv) {
+						callbackDiv.style.display = 'none';
+						document.getElementById('spotifyCallbackInput').value = '';
+					}
+					// Show success message if already connected
+					if (response.alreadyConnected) {
+						console.log('Already connected to Spotify');
+					} else if (response.message && response.message.includes('authorization')) {
+						// For SSAPP, the OAuth window opened - wait for callback
+						console.log('OAuth window opened - waiting for authorization');
+						spotifyAuthButton.querySelector('span').textContent = '⏳ Waiting for authorization...';
+						// Show manual input as backup after 5 seconds
+						if (window.ssapp && callbackDiv) {
+							setTimeout(() => {
+								if (!spotifyAuthStatus.style.display || spotifyAuthStatus.style.display === 'none') {
+									callbackDiv.style.display = 'block';
+									console.log('If the authorization window is stuck, you can paste the callback URL manually.');
+								}
+							}, 5000);
+						}
+					}
+				} else {
+					spotifyAuthButton.querySelector('span').textContent = '🔗 Connect to Spotify';
+					const errorMsg = response?.error || 'Unknown error';
+					console.error('Spotify auth failed:', errorMsg);
+					
+					// Show manual callback input only if in Electron and auth failed
+					if (window.ssapp && callbackDiv && (response?.needsManualCallback || response?.waitingForManualCallback)) {
+						callbackDiv.style.display = 'block';
+						console.log('Please paste the callback URL manually.');
+					}
+					
+					// Only show alert if not already connected
+					if (errorMsg !== 'Already connected') {
+						alert('Failed to connect to Spotify. Error: ' + errorMsg + '\n\nPlease ensure:\n1. Spotify integration is enabled\n2. Client ID and Secret are filled in\n3. Your redirect URIs are configured in Spotify app settings');
+					}
+				}
+			}
+		});
+	}
+	
+	// Spotify Sign Out Button
+	if (spotifySignOutButton) {
+		spotifySignOutButton.addEventListener('click', function() {
+			if (confirm('Are you sure you want to sign out of Spotify?')) {
+				// Send message to background script to clear Spotify tokens
+				chrome.runtime.sendMessage({cmd: "spotifySignOut"}, function(response) {
+					if (chrome.runtime.lastError) {
+						console.error('Error signing out:', chrome.runtime.lastError);
+						alert('Failed to sign out. Please try again.');
+						return;
+					}
+					
+					if (response && response.success) {
+						// Update UI
+						spotifyAuthStatus.style.display = 'none';
+						spotifySignOutButton.style.display = 'none';
+						spotifyAuthButton.querySelector('span').textContent = '🔗 Connect to Spotify';
+						
+						// Clear any manual callback inputs if present
+						const callbackDiv = document.getElementById('spotifyCallbackDiv');
+						if (callbackDiv) {
+							callbackDiv.style.display = 'none';
+							const callbackInput = document.getElementById('spotifyCallbackInput');
+							if (callbackInput) {
+								callbackInput.value = '';
+							}
+						}
+						
+						console.log('Successfully signed out of Spotify');
+						alert('Successfully signed out of Spotify');
+					} else {
+						alert('Failed to sign out: ' + (response?.error || 'Unknown error'));
+					}
+				});
+			}
+		});
+	}
+	
+	// Spotify Setup Guide Button
+	const spotifySetupGuide = document.getElementById('spotifySetupGuide');
+	if (spotifySetupGuide) {
+		spotifySetupGuide.addEventListener('click', function() {
+			// Open spotify.html in a new tab to show setup instructions
+			const spotifyGuideUrl = chrome.runtime.getURL('spotify.html');
+			chrome.tabs.create({ url: spotifyGuideUrl });
+		});
+	}
+
 	let initialSetup = setInterval(()=>{
 		log("pop up asking main for settings yet again..");
 		chrome.runtime.sendMessage({cmd: "getSettings"}, (response) => {
@@ -4710,6 +5843,14 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 	var iii = document.querySelectorAll("input[type='text'][class*='instant']");
 	for (var i=0;i<iii.length;i++){
 		iii[i].oninput = updateSettings;
+	}
+	
+	var iii = document.querySelectorAll("input[type='range']");
+	for (var i=0;i<iii.length;i++){
+		updateRangeDisplay(iii[i]);
+		iii[i].dataset.rangePrevValue = iii[i].value;
+		iii[i].oninput = handleRangeInput;
+		iii[i].onchange = handleRangeInput;
 	}
 	
 	var iii = document.querySelectorAll("input[type='number']");
@@ -4762,65 +5903,7 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 	const presetSelector = document.getElementById('featured-preset-select');
 	if (presetSelector) {
 		presetSelector.addEventListener('change', function() {
-			const overlayDiv = document.getElementById('overlay');
-			const overlayLink = document.getElementById('overlaylink');
-			
-			if (!overlayDiv || !overlayLink) return;
-			
-			// Hide all preset configuration sections first
-			document.querySelectorAll('.preset-config-section').forEach(section => {
-				section.style.display = 'none';
-			});
-			
-			if (this.value) {
-				// A preset is selected - use the preset URL
-				const presetUrl = baseURL + this.value;
-				
-				// Get the current parameters from the classic featured.html
-				const currentParams = overlayDiv.raw?.split('?')[1] || '';
-				
-				// Extract session/room parameter
-				const urlParams = new URLSearchParams(currentParams);
-				const session = urlParams.get('session') || urlParams.get('room') || '';
-				
-				// Build the new URL with session parameter
-				let newUrl = presetUrl;
-				if (session) {
-					newUrl += (presetUrl.includes('?') ? '&' : '?') + 'session=' + session;
-				}
-				
-				// Update the display
-				overlayDiv.raw = newUrl;
-				overlayLink.href = newUrl;
-				overlayLink.innerText = document.body.classList.contains("hidelinks") ? "Click to open link" : newUrl;
-				
-				// Hide classic customization options
-				document.querySelectorAll('.wrapper:has(.options_group.single_message)').forEach(wrapper => {
-					wrapper.style.display = 'none';
-				});
-				
-				// Show the specific preset configuration based on selection
-				const presetType = this.value.match(/featured-(\w+)\.html/)?.[1];
-				if (presetType) {
-					const presetConfigSection = document.getElementById(`preset-config-${presetType}`);
-					if (presetConfigSection) {
-						presetConfigSection.style.display = 'block';
-					}
-				}
-			} else {
-				// Classic mode selected - restore featured.html
-				const currentParams = overlayDiv.raw?.split('?')[1] || '';
-				const classicUrl = baseURL + 'featured.html' + (currentParams ? '?' + currentParams : '');
-				
-				overlayDiv.raw = classicUrl;
-				overlayLink.href = classicUrl;
-				overlayLink.innerText = document.body.classList.contains("hidelinks") ? "Click to open link" : classicUrl;
-				
-				// Show classic customization options
-				document.querySelectorAll('.wrapper:has(.options_group.single_message)').forEach(wrapper => {
-					wrapper.style.display = '';
-				});
-			}
+			applyFeaturedOverlayPreset(this.value);
 		});
 	}
 
@@ -4951,10 +6034,11 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 					configSection.style.display = 'block';
 				}
 				
-				// Hide classic dock options when an overlay theme is selected
-				document.querySelectorAll('.wrapper:has(.options_group.streaming_chat)').forEach(wrapper => {
-					wrapper.style.display = 'none';
-				});
+        // Hide ONLY the streaming chat (dock) option wrappers when an overlay theme is selected
+        document.querySelectorAll("input.collapsible-input[id^='wrapper-chat-']").forEach(inp => {
+            const wrapper = inp.closest('.wrapper');
+            if (wrapper) wrapper.style.display = 'none';
+        });
 			} else {
 				// Classic dock.html selected - restore all parameters
 				let existingParams = '';
@@ -4974,10 +6058,11 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 					dockLink.innerText = document.body.classList.contains("hidelinks") ? "Click to open link" : newUrl;
 				}
 				
-				// Show classic dock customization options
-				document.querySelectorAll('.wrapper:has(.options_group.streaming_chat)').forEach(wrapper => {
-					wrapper.style.display = '';
-				});
+        // Show ONLY the streaming chat (dock) option wrappers
+        document.querySelectorAll("input.collapsible-input[id^='wrapper-chat-']").forEach(inp => {
+            const wrapper = inp.closest('.wrapper');
+            if (wrapper) wrapper.style.display = '';
+        });
 			}
 		});
 	}
@@ -5070,44 +6155,12 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 		document.body.classList.add("hidelinks");
 	} 
 	
-	// Function to dynamically load the WebMidi script
-    async function loadWebMidiScript(callback) {
-        const script = document.createElement("script");
-        script.type = "text/javascript";
-        script.src = "./thirdparty/webmidi3.js";
-        script.onload = callback; // Run the callback once the script loads
-        script.onerror = () => {
-            console.error("Failed to load WebMidi script.");
-        };
-        document.body.appendChild(script);
-    }
-    // Function to initialize the MIDI dropdown logic
-    async function initializeMIDIDropdown() {
-	  try {
-		await WebMidi.enable();
-		console.log("WebMidi enabled!");
-		
-		// Initial population of all MIDI selects
-		updateAllMidiSelects();
-		
-		// Handle device changes
-		WebMidi.addListener("connected", updateAllMidiSelects);
-		WebMidi.addListener("disconnected", updateAllMidiSelects);
-		
-	  } catch(e) {
-		console.log("Failed to initialize WebMidi:", e);
-	  }
-	}
 	
 	
 	document.body.classList.add('loaded');
 
-    // Dynamically load the WebMidi script and initialize the dropdown logic
-	try {
-		setTimeout(function(){
-			loadWebMidiScript(initializeMIDIDropdown);
-		},3000);
-	} catch(e){ console.error(e);}
+    // Don't automatically initialize WebMidi - wait for user to enable it
+	console.log("WebMidi initialization deferred until MIDI hotkeys are enabled");
 	
 	// Handle games selector initial state
 	const gamesSelectorInit = document.getElementById('games-preset-select');
@@ -5120,5 +6173,90 @@ document.addEventListener("DOMContentLoaded", async function(event) {
 		if (generalConfig) {
 			generalConfig.style.display = 'block';
 		}
+	}
+
+
+	// Handle custom beep upload buttons
+	const uploadBeepBtn = document.getElementById('uploadBeepBtn');
+	if (uploadBeepBtn) {
+		uploadBeepBtn.onclick = function() {
+			// Open the media hosting service in a popup window
+			const popup = window.open('https://fileuploads.socialstream.ninja/popup/upload', 'uploadBeep', 'width=640,height=640');
+			
+			// Listen for message from the popup
+			window.addEventListener('message', function handleMessage(event) {
+				// Verify the origin for security
+				if (event.origin !== 'https://fileuploads.socialstream.ninja') return;
+				
+				// Check if this is our media upload message
+				if (event.data && event.data.type === 'media-uploaded') {
+					// Fill the custom beep input with the uploaded URL
+					const customBeepInput = document.getElementById('custombeep');
+					if (customBeepInput) {
+						customBeepInput.value = event.data.url;
+						// Trigger change event to save the value
+						customBeepInput.dispatchEvent(new Event('input', { bubbles: true }));
+						customBeepInput.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					
+					// Remove this specific listener
+					window.removeEventListener('message', handleMessage);
+				}
+			});
+		};
+	}
+
+	// Handle second custom beep upload button
+	const uploadBeepBtn2 = document.getElementById('uploadBeepBtn2');
+	if (uploadBeepBtn2) {
+		uploadBeepBtn2.onclick = function() {
+			// Open the media hosting service in a popup window
+			const popup = window.open('https://fileuploads.socialstream.ninja/popup/upload', 'uploadBeep2', 'width=640,height=640');
+			
+			// Listen for message from the popup
+			window.addEventListener('message', function handleMessage(event) {
+				// Verify the origin for security
+				if (event.origin !== 'https://fileuploads.socialstream.ninja') return;
+				
+				// Check if this is our media upload message
+				if (event.data && event.data.type === 'media-uploaded') {
+					// Fill the second custom beep input with the uploaded URL
+					const customBeepInput2 = document.getElementById('custombeep2');
+					if (customBeepInput2) {
+						customBeepInput2.value = event.data.url;
+						// Trigger change event to save the value
+						customBeepInput2.dispatchEvent(new Event('input', { bubbles: true }));
+						customBeepInput2.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					
+					// Remove this specific listener
+					window.removeEventListener('message', handleMessage);
+				}
+			});
+		};
+	}
+
+	const uploadFeaturedFallbackBtn = document.getElementById('uploadFeaturedFallbackBtn');
+	if (uploadFeaturedFallbackBtn) {
+		uploadFeaturedFallbackBtn.onclick = function() {
+			window.open('https://fileuploads.socialstream.ninja/popup/upload', 'uploadFeaturedFallback', 'width=640,height=640');
+			window.addEventListener('message', function handleMessage(event) {
+				if (event.origin !== 'https://fileuploads.socialstream.ninja') return;
+				if (event.data && event.data.type === 'media-uploaded') {
+					const fallbackInput = document.getElementById('featuredFallbackImage');
+					if (fallbackInput) {
+						fallbackInput.value = event.data.url;
+						fallbackInput.dispatchEvent(new Event('input', { bubbles: true }));
+						fallbackInput.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					const fallbackToggle = document.querySelector('input[data-param2="fallbackimg"]');
+					if (fallbackToggle && !fallbackToggle.checked) {
+						fallbackToggle.checked = true;
+						fallbackToggle.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					window.removeEventListener('message', handleMessage);
+				}
+			});
+		};
 	}
 });
